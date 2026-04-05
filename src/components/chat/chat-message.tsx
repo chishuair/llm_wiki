@@ -112,13 +112,7 @@ export function StreamingMessage({ content }: StreamingMessageProps) {
 }
 
 function MarkdownContent({ content }: { content: string }) {
-  const sourceFiles = cachedSourceFiles
-
-  // Process the content: replace [[wikilinks]], @filename, and bare source filenames
-  const processed = useMemo(
-    () => processContent(content, sourceFiles),
-    [content, sourceFiles]
-  )
+  const processed = useMemo(() => processContent(content), [content])
 
   return (
     <div className="chat-markdown prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:my-2 prose-code:text-xs prose-code:before:content-none prose-code:after:content-none">
@@ -128,10 +122,6 @@ function MarkdownContent({ content }: { content: string }) {
             if (href?.startsWith("wikilink:")) {
               const pageName = href.slice("wikilink:".length)
               return <WikiLink pageName={pageName}>{children}</WikiLink>
-            }
-            if (href?.startsWith("sourceref:")) {
-              const fileName = href.slice("sourceref:".length)
-              return <SourceRef fileName={fileName} />
             }
             return (
               <span className="text-primary underline cursor-default" title={href}>
@@ -152,40 +142,16 @@ function MarkdownContent({ content }: { content: string }) {
 
 /**
  * Process content to create clickable links:
- * 1. [[wikilinks]] → markdown links with wikilink: protocol
- * 2. @filename → markdown links with sourceref: protocol
- * 3. Bare source filenames mentioned in text → markdown links with sourceref: protocol
+ * - [[wikilinks]] → markdown links with wikilink: protocol
  */
-function processContent(text: string, sourceFiles: string[]): string {
-  // Step 1: Process [[wikilinks]]
-  let result = text.replace(
+function processContent(text: string): string {
+  return text.replace(
     /\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g,
     (_match, pageName: string, displayText?: string) => {
       const display = displayText?.trim() || pageName.trim()
       return `[${display}](wikilink:${pageName.trim()})`
     }
   )
-
-  // Step 2: Process @filename (with or without extension)
-  result = result.replace(
-    /@([\w.+\-]+)/g,
-    (_match, name: string) => {
-      return `[@${name}](sourceref:${name})`
-    }
-  )
-
-  // Step 3: Replace bare source filenames that appear in the text
-  // Sort by length (longest first) to avoid partial matches
-  const sortedFiles = [...sourceFiles].sort((a, b) => b.length - a.length)
-  for (const fileName of sortedFiles) {
-    // Skip if already inside a markdown link
-    // Use a regex that matches the filename but not inside []() syntax
-    const escaped = fileName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-    const pattern = new RegExp(`(?<!\\]\\(sourceref:)(?<!\\[@?)\\b(${escaped})\\b`, "g")
-    result = result.replace(pattern, `[@$1](sourceref:$1)`)
-  }
-
-  return result
 }
 
 function SourceRef({ fileName }: { fileName: string }) {
