@@ -10,20 +10,20 @@ import { GraphView } from "@/components/graph/graph-view"
 export function ContentArea() {
   const activeView = useWikiStore((s) => s.activeView)
 
-  return (
-    <div className="relative h-full">
-      {/* Graph stays mounted, shown/hidden via CSS so it updates in real-time */}
-      <div className={`absolute inset-0 ${activeView === "graph" ? "" : "invisible pointer-events-none"}`}>
-        <GraphView />
-      </div>
-
-      {/* Other views mount/unmount normally */}
-      {activeView === "settings" && <SettingsView />}
-      {activeView === "sources" && <SourcesView />}
-      {activeView === "review" && <ReviewView />}
-      {activeView === "lint" && <LintView />}
-      {activeView === "search" && <SearchView />}
-      {activeView === "wiki" && <ChatPanel />}
-    </div>
-  )
+  switch (activeView) {
+    case "settings":
+      return <SettingsView />
+    case "sources":
+      return <SourcesView />
+    case "review":
+      return <ReviewView />
+    case "lint":
+      return <LintView />
+    case "search":
+      return <SearchView />
+    case "graph":
+      return <GraphView />
+    default:
+      return <ChatPanel />
+  }
 }
