@@ -1,7 +1,7 @@
 import { webSearch } from "./web-search"
 import { streamChat } from "./llm-client"
 import { autoIngest } from "./ingest"
-import { writeFile, listDirectory } from "@/commands/fs"
+import { writeFile, readFile, listDirectory } from "@/commands/fs"
 import { useWikiStore, type LlmConfig, type SearchApiConfig } from "@/stores/wiki-store"
 import { useResearchStore } from "@/stores/research-store"
 
@@ -102,19 +102,35 @@ async function executeResearch(
       .map((r, i) => `[${i + 1}] **${r.title}** (${r.source})\n${r.snippet}`)
       .join("\n\n")
 
+    // Read existing wiki index to enable cross-referencing
+    let wikiIndex = ""
+    try {
+      wikiIndex = await readFile(`${projectPath}/wiki/index.md`)
+    } catch {
+      // no index yet
+    }
+
     const systemPrompt = [
       "You are a research assistant. Synthesize the web search results into a comprehensive wiki page.",
       "",
       "## Language Rule",
       "- ALWAYS match the language of the research topic. If the topic is in Chinese, write in Chinese. If in English, write in English.",
       "",
+      "## Cross-referencing (IMPORTANT)",
+      "- The wiki already has existing pages listed in the Wiki Index below.",
+      "- When your synthesis mentions an entity or concept that exists in the wiki, ALWAYS use [[wikilink]] syntax to link to it.",
+      "- For example, if the wiki has an entity 'anthropic', write [[anthropic]] when mentioning it.",
+      "- This is critical for connecting new research to existing knowledge in the graph.",
+      "",
+      "## Writing Rules",
       "- Organize into clear sections with headings",
-      "- Cite sources using [N] notation",
+      "- Cite web sources using [N] notation",
       "- Note contradictions or gaps",
       "- Suggest additional sources worth finding",
       "- Neutral, encyclopedic tone",
-      "- Use [[wikilink]] for cross-references",
-    ].join("\n")
+      "",
+      wikiIndex ? `## Existing Wiki Index (link to these pages with [[wikilink]])\n${wikiIndex}` : "",
+    ].filter(Boolean).join("\n")
 
     let accumulated = ""
 
