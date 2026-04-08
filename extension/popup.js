@@ -192,7 +192,7 @@ async function fallbackExtract(tabId) {
 
   if (results?.[0]?.result) {
     extractedContent = results[0].result;
-    contentPreview.textContent = extractedContent.slice(0, 200) + "...";
+    contentPreview.textContent = extractedContent;
     clipBtn.disabled = false;
   } else {
     contentPreview.textContent = "Failed to extract content";
