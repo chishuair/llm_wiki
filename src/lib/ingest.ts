@@ -6,6 +6,7 @@ import { useChatStore } from "@/stores/chat-store"
 import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
+import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
 
 const FILE_BLOCK_REGEX = /---FILE:\s*([^\n-]+?)\s*---\n([\s\S]*?)---END FILE---/g
 
@@ -40,6 +41,17 @@ export async function autoIngest(
     tryReadFile(`${pp}/wiki/index.md`),
     tryReadFile(`${pp}/wiki/overview.md`),
   ])
+
+  // ── Cache check: skip re-ingest if source content hasn't changed ──
+  const cachedFiles = await checkIngestCache(pp, fileName, sourceContent)
+  if (cachedFiles !== null) {
+    activity.updateItem(activityId, {
+      status: "done",
+      detail: `Skipped (unchanged) — ${cachedFiles.length} files from previous ingest`,
+      filesWritten: cachedFiles,
+    })
+    return cachedFiles
+  }
 
   const truncatedContent = sourceContent.length > 50000
     ? sourceContent.slice(0, 50000) + "\n\n[...truncated...]"
@@ -161,6 +173,11 @@ export async function autoIngest(
   const reviewItems = parseReviewBlocks(generation, sp)
   if (reviewItems.length > 0) {
     useReviewStore.getState().addItems(reviewItems)
+  }
+
+  // ── Step 5: Save to cache ───────────────────────────────────
+  if (writtenPaths.length > 0) {
+    await saveIngestCache(pp, fileName, sourceContent, writtenPaths)
   }
 
   const detail = writtenPaths.length > 0

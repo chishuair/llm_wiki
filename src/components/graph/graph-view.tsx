@@ -3,11 +3,12 @@ import Graph from "graphology"
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from "@react-sigma/core"
 import "@react-sigma/core/lib/style.css"
 import forceAtlas2 from "graphology-layout-forceatlas2"
-import { Network, RefreshCw, ZoomIn, ZoomOut, Maximize, Layers, Tag } from "lucide-react"
+import { Network, RefreshCw, ZoomIn, ZoomOut, Maximize, Layers, Tag, Lightbulb, AlertTriangle, Link2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
 import { readFile } from "@/commands/fs"
 import { buildWikiGraph, type GraphNode, type GraphEdge, type CommunityInfo } from "@/lib/wiki-graph"
+import { findSurprisingConnections, detectKnowledgeGaps, type SurprisingConnection, type KnowledgeGap } from "@/lib/graph-insights"
 import { normalizePath } from "@/lib/path-utils"
 
 const NODE_TYPE_COLORS: Record<string, string> = {
@@ -259,10 +260,13 @@ export function GraphView() {
   const [nodes, setNodes] = useState<GraphNode[]>([])
   const [edges, setEdges] = useState<GraphEdge[]>([])
   const [communities, setCommunities] = useState<CommunityInfo[]>([])
+  const [surprisingConns, setSurprisingConns] = useState<SurprisingConnection[]>([])
+  const [knowledgeGaps, setKnowledgeGaps] = useState<KnowledgeGap[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hoveredType, setHoveredType] = useState<string | null>(null)
   const [colorMode, setColorMode] = useState<ColorMode>("type")
+  const [showInsights, setShowInsights] = useState(false)
   const lastLoadedVersion = useRef(-1)
 
   const loadGraph = useCallback(async () => {
@@ -274,6 +278,8 @@ export function GraphView() {
       setNodes(result.nodes)
       setEdges(result.edges)
       setCommunities(result.communities)
+      setSurprisingConns(findSurprisingConnections(result.nodes, result.edges, result.communities))
+      setKnowledgeGaps(detectKnowledgeGaps(result.nodes, result.edges, result.communities))
       lastLoadedVersion.current = useWikiStore.getState().dataVersion
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to build graph"
@@ -381,6 +387,20 @@ export function GraphView() {
             <Layers className="h-3 w-3" />
             Community
           </Button>
+          {(surprisingConns.length > 0 || knowledgeGaps.length > 0) && (
+            <Button
+              variant={showInsights ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setShowInsights((v) => !v)}
+              className="text-xs gap-1 h-7"
+            >
+              <Lightbulb className="h-3 w-3" />
+              Insights
+              <span className="rounded bg-muted px-1 text-[10px]">
+                {surprisingConns.length + knowledgeGaps.length}
+              </span>
+            </Button>
+          )}
           <Button variant="ghost" size="sm" onClick={loadGraph} className="text-xs gap-1 h-7">
             <RefreshCw className="h-3.5 w-3.5" />
           </Button>
@@ -497,6 +517,49 @@ export function GraphView() {
             </>
           )}
         </div>
+
+        {/* Insights Panel */}
+        {showInsights && (
+          <div className="absolute bottom-3 right-14 w-72 max-h-[60%] overflow-y-auto rounded-lg border bg-background/95 backdrop-blur-sm px-3 py-2 text-xs shadow-lg">
+            {surprisingConns.length > 0 && (
+              <div className="mb-3">
+                <div className="flex items-center gap-1.5 mb-1.5 font-semibold text-foreground">
+                  <Link2 className="h-3.5 w-3.5 text-blue-500" />
+                  Surprising Connections
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {surprisingConns.map((conn, i) => (
+                    <div key={i} className="rounded border px-2 py-1.5 bg-muted/30">
+                      <div className="font-medium text-foreground">
+                        {conn.source.label} ↔ {conn.target.label}
+                      </div>
+                      <div className="text-muted-foreground mt-0.5">
+                        {conn.reasons.join(", ")}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {knowledgeGaps.length > 0 && (
+              <div>
+                <div className="flex items-center gap-1.5 mb-1.5 font-semibold text-foreground">
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                  Knowledge Gaps
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {knowledgeGaps.map((gap, i) => (
+                    <div key={i} className="rounded border px-2 py-1.5 bg-muted/30">
+                      <div className="font-medium text-foreground">{gap.title}</div>
+                      <div className="text-muted-foreground mt-0.5">{gap.description}</div>
+                      <div className="text-muted-foreground/80 mt-1 italic">{gap.suggestion}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
     </div>
