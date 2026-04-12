@@ -21,6 +21,10 @@ pub fn run() {
             commands::fs::create_directory,
             commands::project::create_project,
             commands::project::open_project,
+            commands::vectorstore::vector_upsert,
+            commands::vectorstore::vector_search,
+            commands::vectorstore::vector_delete,
+            commands::vectorstore::vector_count,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

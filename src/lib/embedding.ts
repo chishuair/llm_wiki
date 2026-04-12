@@ -1,21 +1,10 @@
-import { readFile, writeFile, listDirectory } from "@/commands/fs"
+import { readFile, listDirectory } from "@/commands/fs"
+import { invoke } from "@tauri-apps/api/core"
 import type { LlmConfig, EmbeddingConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
 
-// ── Types ─────────────────────────────────────────────────────────────────
-
-interface EmbeddingCache {
-  model: string
-  embeddings: Record<string, number[]> // pageId -> vector
-}
-
-// ── Module cache ──────────────────────────────────────────────────────────
-
-let cache: EmbeddingCache | null = null
-let cacheProjectPath = ""
-
-// ── API ───────────────────────────────────────────────────────────────────
+// ── Embedding API ─────────────────────────────────────────────────────────
 
 function getEmbeddingEndpoint(llmConfig: LlmConfig): string {
   switch (llmConfig.provider) {
@@ -24,10 +13,8 @@ function getEmbeddingEndpoint(llmConfig: LlmConfig): string {
     case "ollama":
       return `${llmConfig.ollamaUrl}/v1/embeddings`
     case "custom":
-      // Assume custom endpoint supports /embeddings
       return llmConfig.customEndpoint.replace(/\/chat\/completions\/?$/, "/embeddings")
     default:
-      // For providers without native embedding, use custom endpoint if set
       return llmConfig.customEndpoint
         ? llmConfig.customEndpoint.replace(/\/chat\/completions\/?$/, "/embeddings")
         : ""
@@ -56,12 +43,10 @@ async function fetchEmbedding(
       headers: getAuthHeaders(llmConfig),
       body: JSON.stringify({
         model: embeddingConfig.model,
-        input: text.slice(0, 2000), // truncate to avoid token limits
+        input: text.slice(0, 2000),
       }),
     })
-
     if (!resp.ok) return null
-
     const data = await resp.json()
     return data?.data?.[0]?.embedding ?? null
   } catch {
@@ -69,48 +54,41 @@ async function fetchEmbedding(
   }
 }
 
-// ── Cache management ──────────────────────────────────────────────────────
+// ── LanceDB operations via Tauri commands ─────────────────────────────────
 
-function cachePath(projectPath: string): string {
-  return `${normalizePath(projectPath)}/.llm-wiki/embeddings.json`
+async function vectorUpsert(projectPath: string, pageId: string, embedding: number[]): Promise<void> {
+  await invoke("vector_upsert", {
+    projectPath: normalizePath(projectPath),
+    pageId,
+    embedding: embedding.map((v) => Math.fround(v)), // ensure f32
+  })
 }
 
-async function loadCache(projectPath: string, model: string): Promise<EmbeddingCache> {
-  const pp = normalizePath(projectPath)
-  if (cache && cacheProjectPath === pp && cache.model === model) {
-    return cache
-  }
-
-  try {
-    const raw = await readFile(cachePath(pp))
-    const loaded = JSON.parse(raw) as EmbeddingCache
-    // Invalidate if model changed
-    if (loaded.model !== model) {
-      cache = { model, embeddings: {} }
-    } else {
-      cache = loaded
-    }
-  } catch {
-    cache = { model, embeddings: {} }
-  }
-
-  cacheProjectPath = pp
-  return cache
+async function vectorSearchLance(projectPath: string, queryEmbedding: number[], topK: number): Promise<Array<{ page_id: string; score: number }>> {
+  return await invoke("vector_search", {
+    projectPath: normalizePath(projectPath),
+    queryEmbedding: queryEmbedding.map((v) => Math.fround(v)),
+    topK,
+  })
 }
 
-async function saveCache(projectPath: string): Promise<void> {
-  if (!cache) return
-  try {
-    await writeFile(cachePath(projectPath), JSON.stringify(cache))
-  } catch {
-    // non-critical
-  }
+async function vectorDelete(projectPath: string, pageId: string): Promise<void> {
+  await invoke("vector_delete", {
+    projectPath: normalizePath(projectPath),
+    pageId,
+  })
+}
+
+async function vectorCount(projectPath: string): Promise<number> {
+  return await invoke("vector_count", {
+    projectPath: normalizePath(projectPath),
+  })
 }
 
 // ── Public API ────────────────────────────────────────────────────────────
 
 /**
- * Embed a single page and cache the result.
+ * Embed a single page and store in LanceDB.
  * Called after ingest to keep embeddings up to date.
  */
 export async function embedPage(
@@ -123,18 +101,15 @@ export async function embedPage(
 ): Promise<void> {
   if (!embeddingConfig.enabled || !embeddingConfig.model) return
 
-  const c = await loadCache(projectPath, embeddingConfig.model)
   const text = `${title}\n${content.slice(0, 1500)}`
   const emb = await fetchEmbedding(text, llmConfig, embeddingConfig)
-
   if (emb) {
-    c.embeddings[pageId] = emb
-    await saveCache(projectPath)
+    await vectorUpsert(projectPath, pageId, emb)
   }
 }
 
 /**
- * Embed all wiki pages that are not yet cached.
+ * Embed all wiki pages that are not yet indexed.
  * Called on first enable or when model changes.
  */
 export async function embedAllPages(
@@ -146,9 +121,7 @@ export async function embedAllPages(
   if (!embeddingConfig.enabled || !embeddingConfig.model) return 0
 
   const pp = normalizePath(projectPath)
-  const c = await loadCache(pp, embeddingConfig.model)
 
-  // Find all wiki .md files
   let tree: FileNode[]
   try {
     tree = await listDirectory(`${pp}/wiki`)
@@ -171,42 +144,32 @@ export async function embedAllPages(
   }
   walk(tree)
 
-  // Only embed pages not in cache
-  const toEmbed = mdFiles.filter((f) => !(f.id in c.embeddings))
   let done = 0
-
-  for (const file of toEmbed) {
+  for (const file of mdFiles) {
     try {
       const content = await readFile(file.path)
-      // Extract title from frontmatter
       const titleMatch = content.match(/^---\n[\s\S]*?^title:\s*["']?(.+?)["']?\s*$/m)
       const title = titleMatch ? titleMatch[1].trim() : file.id
 
       const text = `${title}\n${content.slice(0, 1500)}`
       const emb = await fetchEmbedding(text, llmConfig, embeddingConfig)
       if (emb) {
-        c.embeddings[file.id] = emb
+        await vectorUpsert(pp, file.id, emb)
       }
     } catch {
       // skip
     }
 
     done++
-    if (onProgress) onProgress(done, toEmbed.length)
-
-    // Save periodically
-    if (done % 20 === 0) {
-      await saveCache(pp)
-    }
+    if (onProgress) onProgress(done, mdFiles.length)
   }
 
-  await saveCache(pp)
   return done
 }
 
 /**
- * Search wiki pages by semantic similarity.
- * Returns page IDs sorted by cosine similarity.
+ * Search wiki pages by semantic similarity via LanceDB.
+ * Returns page IDs sorted by similarity score.
  */
 export async function searchByEmbedding(
   projectPath: string,
@@ -217,45 +180,40 @@ export async function searchByEmbedding(
 ): Promise<Array<{ id: string; score: number }>> {
   if (!embeddingConfig.enabled || !embeddingConfig.model) return []
 
-  const c = await loadCache(projectPath, embeddingConfig.model)
   const queryEmb = await fetchEmbedding(query, llmConfig, embeddingConfig)
   if (!queryEmb) return []
 
-  const scored: Array<{ id: string; score: number }> = []
-
-  for (const [pageId, pageEmb] of Object.entries(c.embeddings)) {
-    const sim = cosineSimilarity(queryEmb, pageEmb)
-    if (sim > 0) {
-      scored.push({ id: pageId, score: sim })
-    }
+  try {
+    const results = await vectorSearchLance(projectPath, queryEmb, topK)
+    return results.map((r) => ({ id: r.page_id, score: r.score }))
+  } catch {
+    return []
   }
-
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, topK)
 }
 
 /**
- * Clear embedding cache (e.g., when model changes).
+ * Remove a page from the vector index.
  */
-export async function clearEmbeddingCache(projectPath: string): Promise<void> {
-  cache = null
-  cacheProjectPath = ""
+export async function removePageEmbedding(
+  projectPath: string,
+  pageId: string,
+): Promise<void> {
   try {
-    await writeFile(cachePath(projectPath), JSON.stringify({ model: "", embeddings: {} }))
+    await vectorDelete(projectPath, pageId)
   } catch {
     // non-critical
   }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0, normA = 0, normB = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
+/**
+ * Get the number of indexed vectors.
+ */
+export async function getEmbeddingCount(
+  projectPath: string,
+): Promise<number> {
+  try {
+    return await vectorCount(projectPath)
+  } catch {
+    return 0
   }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB)
-  return denom === 0 ? 0 : dot / denom
 }
