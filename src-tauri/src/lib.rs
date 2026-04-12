@@ -29,14 +29,34 @@ pub fn run() {
             commands::vectorstore::vector_count,
         ])
         .on_window_event(|window, event| {
-            // macOS behavior: close button hides window instead of quitting
-            // Cmd+Q still quits the app normally
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 #[cfg(target_os = "macos")]
                 {
-                    // Hide the window instead of closing it
+                    // macOS: hide window instead of quitting, Cmd+Q still quits
                     let _ = window.hide();
                     api.prevent_close();
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // Windows/Linux: show confirmation dialog before closing
+                    use tauri::Emitter;
+                    api.prevent_close();
+                    let win = window.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let confirm = tauri_plugin_dialog::MessageDialogBuilder::new(
+                            "Confirm Exit",
+                            "Are you sure you want to quit LLM Wiki?",
+                        )
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+                        .ok_button_label("Quit")
+                        .cancel_button_label("Cancel")
+                        .blocking_show();
+
+                        if confirm {
+                            let _ = win.destroy();
+                        }
+                    });
                 }
             }
         })
