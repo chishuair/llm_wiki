@@ -1,0 +1,162 @@
+import { useCallback, useEffect, useRef, useState } from "react"
+import { useWikiStore } from "@/stores/wiki-store"
+import { listDirectory } from "@/commands/fs"
+import { normalizePath } from "@/lib/path-utils"
+import { IconSidebar } from "./icon-sidebar"
+import { SidebarPanel } from "./sidebar-panel"
+import { ContentArea } from "./content-area"
+import { PreviewPanel } from "./preview-panel"
+import { ResearchPanel } from "./research-panel"
+import { ActivityPanel } from "./activity-panel"
+import { useResearchStore } from "@/stores/research-store"
+import { ErrorBoundary } from "@/components/error-boundary"
+
+interface AppLayoutProps {
+  onSwitchProject: () => void
+  onSelectProject: (project: import("@/types/wiki").WikiProject) => void | Promise<void>
+  onNewProject: () => void
+  onOpenProject: () => void | Promise<void>
+}
+
+export function AppLayout({ onSwitchProject, onSelectProject, onNewProject, onOpenProject }: AppLayoutProps) {
+  const project = useWikiStore((s) => s.project)
+  const selectedFile = useWikiStore((s) => s.selectedFile)
+  const activeView = useWikiStore((s) => s.activeView)
+  const researchPanelOpen = useResearchStore((s) => s.panelOpen)
+  const setFileTree = useWikiStore((s) => s.setFileTree)
+  const [leftWidth, setLeftWidth] = useState(220)
+  const [rightWidth, setRightWidth] = useState(400)
+  const isDraggingLeft = useRef(false)
+  const isDraggingRight = useRef(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const loadFileTree = useCallback(async () => {
+    if (!project) return
+    try {
+      const tree = await listDirectory(normalizePath(project.path))
+      setFileTree(tree)
+    } catch (err) {
+      console.error("Failed to load file tree:", err)
+    }
+  }, [project, setFileTree])
+
+  useEffect(() => {
+    loadFileTree()
+  }, [loadFileTree])
+
+  const startDrag = useCallback(
+    (side: "left" | "right") => (e: React.MouseEvent) => {
+      e.preventDefault()
+      if (side === "left") isDraggingLeft.current = true
+      else isDraggingRight.current = true
+      document.body.style.cursor = "col-resize"
+      document.body.style.userSelect = "none"
+      document.body.dataset.panelResizing = "true"
+
+      const handleMouseMove = (e: MouseEvent) => {
+        if (!containerRef.current) return
+        const rect = containerRef.current.getBoundingClientRect()
+
+        if (isDraggingLeft.current) {
+          const newWidth = e.clientX - rect.left
+          // Hard cap: 150 to 400px
+          setLeftWidth(Math.max(150, Math.min(400, newWidth)))
+        }
+        if (isDraggingRight.current) {
+          const newWidth = rect.right - e.clientX
+          // Hard cap: 250 to 50% of container
+          setRightWidth(Math.max(250, Math.min(rect.width * 0.5, newWidth)))
+        }
+      }
+
+      const handleMouseUp = () => {
+        isDraggingLeft.current = false
+        isDraggingRight.current = false
+        document.body.style.cursor = ""
+        document.body.style.userSelect = ""
+        delete document.body.dataset.panelResizing
+        document.removeEventListener("mousemove", handleMouseMove)
+        document.removeEventListener("mouseup", handleMouseUp)
+      }
+
+      document.addEventListener("mousemove", handleMouseMove)
+      document.addEventListener("mouseup", handleMouseUp)
+    },
+    []
+  )
+
+  const hasRightPanel = activeView !== "transcript" && !!(selectedFile || researchPanelOpen)
+
+  return (
+    <div className="flex h-screen bg-background text-foreground">
+      <IconSidebar
+        onSwitchProject={onSwitchProject}
+        onSelectProject={onSelectProject}
+        onNewProject={onNewProject}
+        onOpenProject={onOpenProject}
+      />
+      <div ref={containerRef} className="flex min-w-0 flex-1 overflow-hidden">
+        {/* Left: File tree + Activity */}
+        <div
+          className="flex shrink-0 flex-col overflow-hidden border-r"
+          style={{ width: leftWidth }}
+        >
+          <div className="flex-1 overflow-hidden">
+            <SidebarPanel />
+          </div>
+          <ActivityPanel />
+        </div>
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          className="group relative w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/40 active:bg-primary/60"
+          onMouseDown={startDrag("left")}
+        >
+          <div className="absolute inset-y-0 -left-1 -right-1" />
+          <div className="pointer-events-none absolute left-1/2 top-1/2 h-10 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-border/80 opacity-0 transition-opacity group-hover:opacity-100" />
+        </div>
+
+        {/* Center: Chat or view (sources/settings/review) */}
+        <div className="min-w-0 flex-1 overflow-hidden">
+          <ErrorBoundary>
+            <ContentArea />
+          </ErrorBoundary>
+        </div>
+
+        {/* Right panels */}
+        {hasRightPanel && (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              className="group relative w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/40 active:bg-primary/60"
+              onMouseDown={startDrag("right")}
+            >
+              <div className="absolute inset-y-0 -left-1 -right-1" />
+              <div className="pointer-events-none absolute left-1/2 top-1/2 h-10 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-border/80 opacity-0 transition-opacity group-hover:opacity-100" />
+            </div>
+            <div
+              className="flex shrink-0 flex-col overflow-hidden border-l"
+              style={{ width: rightWidth }}
+            >
+              <ErrorBoundary>
+                {/* File preview on top (if file selected) */}
+                {selectedFile && (
+                  <div className={researchPanelOpen ? "flex-1 overflow-hidden border-b" : "flex-1 overflow-hidden"}>
+                    <PreviewPanel />
+                  </div>
+                )}
+                {/* Research panel on bottom (if open) */}
+                {researchPanelOpen && (
+                  <div className={selectedFile ? "h-1/2 shrink-0 overflow-hidden" : "flex-1 overflow-hidden"}>
+                    <ResearchPanel />
+                  </div>
+                )}
+              </ErrorBoundary>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}

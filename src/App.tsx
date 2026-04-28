@@ -1,0 +1,244 @@
+import { useState, useEffect } from "react"
+import { open } from "@tauri-apps/plugin-dialog"
+import i18n from "@/i18n"
+import { useWikiStore } from "@/stores/wiki-store"
+import { useReviewStore } from "@/stores/review-store"
+import { useChatStore } from "@/stores/chat-store"
+import { listDirectory, openProject } from "@/commands/fs"
+import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadOutputLanguage } from "@/lib/project-store"
+import { loadReviewItems, loadChatHistory } from "@/lib/persist"
+import { setupAutoSave } from "@/lib/auto-save"
+import { startClipWatcher } from "@/lib/clip-watcher"
+import { loadLawbase } from "@/lib/lawbase"
+import { loadCustomTemplates } from "@/lib/legal-doc/registry"
+import { AppLayout } from "@/components/layout/app-layout"
+import { WelcomeScreen } from "@/components/project/welcome-screen"
+import { CreateProjectDialog } from "@/components/project/create-project-dialog"
+import { AppContextMenu } from "@/components/common/context-menu"
+import type { WikiProject } from "@/types/wiki"
+
+function normalizeLlmConfig(config: ReturnType<typeof useWikiStore.getState>["llmConfig"]) {
+  const hasCustomEndpoint = Boolean(config.customEndpoint && config.customEndpoint.trim())
+  return {
+    ...config,
+    provider: hasCustomEndpoint ? ("custom" as const) : ("ollama" as const),
+    apiKey: config.apiKey ?? "",
+    customEndpoint: hasCustomEndpoint ? config.customEndpoint : "",
+    model: config.model || "qwen2.5:14b",
+    ollamaUrl: config.ollamaUrl || "http://localhost:11434",
+  }
+}
+
+function App() {
+  const project = useWikiStore((s) => s.project)
+  const setProject = useWikiStore((s) => s.setProject)
+  const setFileTree = useWikiStore((s) => s.setFileTree)
+  const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
+  const setActiveView = useWikiStore((s) => s.setActiveView)
+  const [showCreateDialog, setShowCreateDialog] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  // Set up auto-save and clip watcher once on mount
+  useEffect(() => {
+    setupAutoSave()
+    startClipWatcher()
+    // Load the offline lawbase so imported laws are available everywhere
+    loadLawbase().catch(() => {})
+    // Load user-imported legal document templates
+    loadCustomTemplates().catch(() => {})
+  }, [])
+
+  // Auto-open last project on startup
+  useEffect(() => {
+    async function init() {
+      try {
+        const savedConfig = await loadLlmConfig()
+        if (savedConfig) {
+          useWikiStore.getState().setLlmConfig(normalizeLlmConfig(savedConfig))
+        } else {
+          useWikiStore.getState().setLlmConfig(normalizeLlmConfig(useWikiStore.getState().llmConfig))
+        }
+        const savedSearchConfig = await loadSearchApiConfig()
+        if (savedSearchConfig) {
+          useWikiStore.getState().setSearchApiConfig(savedSearchConfig)
+        }
+        const savedEmbeddingConfig = await loadEmbeddingConfig()
+        if (savedEmbeddingConfig) {
+          useWikiStore.getState().setEmbeddingConfig(savedEmbeddingConfig)
+        }
+        const savedOutputLang = await loadOutputLanguage()
+        if (savedOutputLang && savedOutputLang !== "auto") {
+          useWikiStore.getState().setOutputLanguage(savedOutputLang)
+        } else {
+          useWikiStore.getState().setOutputLanguage("Simplified Chinese")
+        }
+        const savedLang = await loadLanguage()
+        if (savedLang) {
+          await i18n.changeLanguage(savedLang)
+        }
+        const lastProject = await getLastProject()
+        if (lastProject) {
+          try {
+            const proj = await openProject(lastProject.path)
+            await handleProjectOpened(proj)
+          } catch {
+            // Last project no longer valid
+          }
+        }
+      } catch {
+        // ignore init errors
+      } finally {
+        setLoading(false)
+      }
+    }
+    init()
+  }, [])
+
+  async function handleProjectOpened(proj: WikiProject) {
+    // Clear all per-project state BEFORE loading new project data
+    // to prevent cross-project contamination. MUST be awaited so the
+    // ingest queue / graph cache are actually cleared before the new
+    // project's state is populated.
+    const { resetProjectState } = await import("@/lib/reset-project-state")
+    await resetProjectState()
+
+    setProject(proj)
+    setSelectedFile(null)
+    setActiveView("dashboard")
+    // Bump data version so any cached graphs/views invalidate
+    useWikiStore.getState().bumpDataVersion()
+    await saveLastProject(proj)
+
+    // Restore ingest queue (resume interrupted tasks)
+    import("@/lib/ingest-queue").then(({ restoreQueue }) => {
+      restoreQueue(proj.path).catch((err) =>
+        console.error("Failed to restore ingest queue:", err)
+      )
+    })
+    // Notify local clip server of the current project + all recent projects
+    fetch("http://127.0.0.1:19827/project", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: proj.path }),
+    }).catch(() => {})
+
+    // Send all recent projects to clip server for extension project picker
+    getRecentProjects().then((recents) => {
+      const projects = recents.map((p) => ({ name: p.name, path: p.path }))
+      fetch("http://127.0.0.1:19827/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projects }),
+      }).catch(() => {})
+    }).catch(() => {})
+    try {
+      const tree = await listDirectory(proj.path)
+      setFileTree(tree)
+    } catch (err) {
+      console.error("Failed to load file tree:", err)
+    }
+    // Load persisted review items
+    try {
+      const savedReview = await loadReviewItems(proj.path)
+      if (savedReview.length > 0) {
+        useReviewStore.getState().setItems(savedReview)
+      }
+    } catch {
+      // ignore, start fresh
+    }
+    // Load persisted chat history
+    try {
+      const savedChat = await loadChatHistory(proj.path)
+      if (savedChat.conversations.length > 0) {
+        useChatStore.getState().setConversations(savedChat.conversations)
+        useChatStore.getState().setMessages(savedChat.messages)
+        // Set most recent conversation as active
+        const sorted = [...savedChat.conversations].sort((a, b) => b.updatedAt - a.updatedAt)
+        if (sorted[0]) {
+          useChatStore.getState().setActiveConversation(sorted[0].id)
+        }
+      }
+    } catch {
+      // ignore, start fresh
+    }
+  }
+
+  async function handleSelectRecent(proj: WikiProject) {
+    try {
+      const validated = await openProject(proj.path)
+      await handleProjectOpened(validated)
+    } catch (err) {
+      window.alert(`打开案件库失败：${err}`)
+    }
+  }
+
+  async function handleOpenProject() {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "打开案件知识库文件夹",
+    })
+    if (!selected) return
+    try {
+      const proj = await openProject(selected)
+      await handleProjectOpened(proj)
+    } catch (err) {
+      window.alert(`打开案件库失败：${err}`)
+    }
+  }
+
+  async function handleSwitchProject() {
+    // Clear all per-project state BEFORE flipping back to the welcome screen
+    // so old data cannot leak in via any async render pass.
+    const { resetProjectState } = await import("@/lib/reset-project-state")
+    await resetProjectState()
+    setProject(null)
+    setFileTree([])
+    setSelectedFile(null)
+  }
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
+        正在加载案件知识库...
+      </div>
+    )
+  }
+
+  if (!project) {
+    return (
+      <>
+        <WelcomeScreen
+          onCreateProject={() => setShowCreateDialog(true)}
+          onOpenProject={handleOpenProject}
+          onSelectProject={handleSelectRecent}
+        />
+        <CreateProjectDialog
+          open={showCreateDialog}
+          onOpenChange={setShowCreateDialog}
+          onCreated={handleProjectOpened}
+        />
+        <AppContextMenu />
+      </>
+    )
+  }
+
+  return (
+    <>
+      <AppLayout
+        onSwitchProject={handleSwitchProject}
+        onSelectProject={handleSelectRecent}
+        onNewProject={() => setShowCreateDialog(true)}
+        onOpenProject={handleOpenProject}
+      />
+      <CreateProjectDialog
+        open={showCreateDialog}
+        onOpenChange={setShowCreateDialog}
+        onCreated={handleProjectOpened}
+      />
+      <AppContextMenu />
+    </>
+  )
+}
+
+export default App

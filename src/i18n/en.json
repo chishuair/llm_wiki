@@ -1,0 +1,109 @@
+{
+  "app": {
+    "title": "案件知识库",
+    "subtitle": "面向中国法官的本地化案件知识管理系统"
+  },
+  "nav": {
+    "wiki": "案件问答",
+    "sources": "案件材料",
+    "search": "全文检索",
+    "graph": "关联图谱",
+    "lint": "规范检查",
+    "review": "待办审阅",
+    "settings": "设置",
+    "switchProject": "切换案件库"
+  },
+  "welcome": {
+    "newProject": "新建案件库",
+    "openProject": "打开案件文件夹",
+    "recentProjects": "案件列表"
+  },
+  "project": {
+    "createTitle": "新建案件知识库",
+    "name": "案件名称",
+    "namePlaceholder": "如：合同纠纷案-2026-001",
+    "parentDir": "父目录",
+    "template": "模板",
+    "cancel": "取消",
+    "create": "创建案件库",
+    "creating": "创建中..."
+  },
+  "sources": {
+    "title": "案件材料",
+    "import": "导入材料",
+    "importing": "Importing...",
+    "noSources": "暂无案件材料",
+    "importHint": "请导入卷宗、证据或文书材料",
+    "importFiles": "导入文件",
+    "ingest": "提取为知识页面",
+    "delete": "删除材料及关联页面",
+    "deleteConfirm": "确定删除“{{name}}”及其关联知识页面？\n\n此操作将：\n- 删除原始材料文件\n- 删除由该材料生成的知识页面\n- 更新 index.md",
+    "sourceCount": "{{count}} 份材料",
+    "sourceCount_plural": "{{count}} 份材料"
+  },
+  "chat": {
+    "placeholder": "请输入案件问题...",
+    "ingestPlaceholder": "请围绕材料继续提问或追问...",
+    "saveToWiki": "保存到知识库",
+    "saving": "保存中...",
+    "saved": "已保存！",
+    "writeToWiki": "写入知识库",
+    "emptyHint": "请输入问题或先提取材料。",
+    "sources": "Sources"
+  },
+  "search": {
+    "title": "全文检索",
+    "placeholder": "检索知识页面...",
+    "noResults": "未找到相关结果",
+    "startSearching": "请输入关键词进行检索"
+  },
+  "lint": {
+    "title": "规范检查",
+    "runLint": "开始检查",
+    "running": "检查中...",
+    "semantic": "语义一致性检查（LLM）",
+    "allClear": "一切正常，未发现问题",
+    "orphan": "孤立页面",
+    "brokenLink": "失效链接",
+    "noOutlinks": "无出链",
+    "contradiction": "内容矛盾",
+    "stale": "内容过时",
+    "missingPage": "缺失页面",
+    "suggestion": "建议"
+  },
+  "review": {
+    "title": "待办审阅",
+    "clearResolved": "清除已解决",
+    "allClear": "一切正常，无需审阅"
+  },
+  "settings": {
+    "title": "设置",
+    "llmProvider": "本地模型配置",
+    "provider": "提供商",
+    "apiKey": "API 密钥",
+    "apiKeyPlaceholder": "请输入 API 密钥",
+    "model": "模型",
+    "customModel": "模型名称",
+    "ollamaUrl": "Ollama 地址",
+    "customEndpoint": "API 端点",
+    "customEndpointHint": "仅支持本地 Ollama",
+    "customApiKey": "API 密钥（如需要）",
+    "modelPlaceholder": "请输入模型名称",
+    "save": "保存设置",
+    "saved": "已保存",
+    "language": "语言",
+    "languageHint": "界面语言"
+  },
+  "preview": {
+    "selectFile": "请选择文件进行预览",
+    "notAvailable": "该文件类型暂不支持预览"
+  },
+  "activity": {
+    "processing": "处理中：{{title}}",
+    "done": "已完成：{{title}}",
+    "clearCompleted": "清除已完成"
+  },
+  "fileTree": {
+    "noProject": "未打开案件库"
+  }
+}
