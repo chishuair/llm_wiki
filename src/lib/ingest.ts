@@ -9,6 +9,7 @@ import { getFileName, normalizePath } from "@/lib/path-utils"
 import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
 import { buildLanguageDirective } from "@/lib/output-language"
 import { detectLanguage } from "@/lib/detect-language"
+import { SUMMARIZE_THRESHOLD, summarizeSource } from "@/lib/legal-doc/source-summary"
 
 // Path capture group allows any non-newline char so hyphenated paths like
 // "wiki/concepts/multi-head-attention.md" are accepted. The lazy `+?` plus
@@ -65,9 +66,34 @@ export async function autoIngest(
     return cachedFiles
   }
 
-  const truncatedContent = sourceContent.length > 50000
-    ? sourceContent.slice(0, 50000) + "\n\n[...truncated...]"
-    : sourceContent
+  let effectiveContent = sourceContent
+  if (sourceContent.length > SUMMARIZE_THRESHOLD) {
+    activity.updateItem(activityId, { detail: "原件较长，正在先分块提炼事实摘要，避免超过模型请求限制..." })
+    try {
+      const relativePath = sp.startsWith(pp + "/") ? sp.slice(pp.length + 1) : fileName
+      const summary = await summarizeSource({
+        projectPath: pp,
+        relativePath,
+        rawText: sourceContent,
+        llmConfig,
+        signal,
+      })
+      effectiveContent = [
+        `【长文档事实提要：${fileName}】`,
+        "",
+        summary.text,
+        "",
+        `（原文约 ${sourceContent.length} 字，已分块提炼；后续知识页面应基于该提要生成。）`,
+      ].join("\n")
+    } catch (err) {
+      console.warn("source summarize failed, fallback to capped content", err)
+      effectiveContent = sourceContent.slice(0, 12000) + "\n\n[...原件过长，已截断；建议安装/配置长文档摘要后重试...]"
+    }
+  }
+
+  const truncatedContent = effectiveContent.length > 30000
+    ? effectiveContent.slice(0, 30000) + "\n\n[...truncated...]"
+    : effectiveContent
 
   // ── Step 1: Analysis ──────────────────────────────────────────
   // LLM reads the source and produces a structured analysis:
@@ -306,11 +332,18 @@ async function writeFileBlocks(projectPath: string, text: string): Promise<strin
       relativePath.includes("/sources/") ||
       relativePath.startsWith("wiki/当事人信息/") ||
       relativePath.includes("/当事人信息/")
+    // Backward compatibility: old projects/tests may still use English wiki
+    // taxonomies like wiki/concepts/*.md. Don't hard-drop those pages by
+    // language guard, otherwise valid legacy outputs are lost.
+    const isLegacyEnglishTaxonomy =
+      /^wiki\/[a-z0-9_-]+\//i.test(relativePath) &&
+      !relativePath.startsWith("wiki/sources/")
     if (
       targetLang &&
       targetLang !== "auto" &&
       !isLog &&
       !isMultilingualAllowed &&
+      !isLegacyEnglishTaxonomy &&
       !contentMatchesTargetLanguage(content, targetLang)
     ) {
       console.warn(
