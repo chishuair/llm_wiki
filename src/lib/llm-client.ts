@@ -10,6 +10,7 @@ export interface StreamCallbacks {
 }
 
 const DECODER = new TextDecoder()
+const MAX_REQUEST_BODY_BYTES = 5_500_000
 
 function parseLines(chunk: Uint8Array, buffer: string): [string[], string] {
   const text = buffer + DECODER.decode(chunk, { stream: true })
@@ -57,10 +58,18 @@ export async function streamChat(
   try {
     const baseBody = providerConfig.buildBody(messages) as Record<string, unknown>
     const body = requestOverrides ? { ...baseBody, ...requestOverrides } : baseBody
+    const serializedBody = JSON.stringify(body)
+    const bodyBytes = new TextEncoder().encode(serializedBody).length
+    if (bodyBytes > MAX_REQUEST_BODY_BYTES) {
+      onError(new Error(
+        `本次请求内容约 ${(bodyBytes / 1048576).toFixed(1)} MB，超过本地模型服务安全上限。请减少一次性输入内容，或等待系统完成长文档分块提要后重试。`
+      ))
+      return
+    }
     response = await fetch(providerConfig.url, {
       method: "POST",
       headers: providerConfig.headers,
-      body: JSON.stringify(body),
+      body: serializedBody,
       signal: combinedSignal,
       // @ts-ignore — keepalive hint for Tauri webview
       keepalive: false,

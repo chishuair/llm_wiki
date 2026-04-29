@@ -18,7 +18,8 @@ import type { FileNode } from "@/types/wiki"
 import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
 import { enrichWithWikilinks } from "@/lib/enrich-wikilinks"
 import { normalizePath, getFileName } from "@/lib/path-utils"
-import { detectMissingLawbaseSignal } from "@/lib/lawbase/prompt"
+import { detectMissingLawbaseSignal, suggestMissingLawNames } from "@/lib/lawbase/prompt"
+import { validateCitations } from "@/lib/lawbase/citations"
 
 // Module-level cache of source file names
 let cachedSourceFiles: string[] = []
@@ -97,6 +98,7 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate }: ChatMess
           )}
         </div>
         {isAssistant && <LawbaseMissingHint content={message.content} />}
+        {isAssistant && <LawCitationValidationHint content={message.content} />}
         {isAssistant && <CitedReferencesPanel content={message.content} savedReferences={message.references} />}
         {isAssistant && hovered && (
           <div className="flex items-center gap-1">
@@ -122,6 +124,7 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate }: ChatMess
 function LawbaseMissingHint({ content }: { content: string }) {
   const setActiveView = useWikiStore((s) => s.setActiveView)
   if (!detectMissingLawbaseSignal(content)) return null
+  const missing = suggestMissingLawNames(content)
   return (
     <div className="mt-1 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-500">
       <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -129,6 +132,11 @@ function LawbaseMissingHint({ content }: { content: string }) {
       <span className="text-amber-500/80">
         AI 已按要求停止引用，请导入相关法律法规后重新提问。
       </span>
+      {missing.length > 0 && (
+        <div className="w-full text-amber-500/90">
+          建议优先补充：{missing.join("、")}
+        </div>
+      )}
       <button
         type="button"
         onClick={() => setActiveView("lawbase")}
@@ -137,6 +145,58 @@ function LawbaseMissingHint({ content }: { content: string }) {
         <Upload className="h-3 w-3" />
         立即导入
       </button>
+    </div>
+  )
+}
+
+function LawCitationValidationHint({ content }: { content: string }) {
+  if (detectMissingLawbaseSignal(content)) return null
+  const validations = validateCitations(content)
+  const invalid = validations.filter((item) => !item.valid)
+  const valid = validations.filter((item) => item.valid)
+
+  const validSeen = new Set<string>()
+  const validItems = valid.filter((item) => {
+    const key = `${item.codeName}-${item.number}`
+    if (validSeen.has(key)) return false
+    validSeen.add(key)
+    return true
+  })
+
+  const seen = new Set<string>()
+  const items = invalid.filter((item) => {
+    const key = `${item.codeName}-${item.number}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+
+  if (items.length === 0 && validItems.length === 0) return null
+
+  return (
+    <div className="mt-1 space-y-1">
+      {validItems.length > 0 && (
+        <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-600">
+          <div className="font-medium">已校验通过的本地法条引用</div>
+          <div className="mt-1 leading-relaxed">
+            {validItems.map((item) => `《${item.codeName}》${item.number}`).join("、")}
+          </div>
+        </div>
+      )}
+      {items.length > 0 && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
+          <div className="flex items-center gap-1.5 font-medium">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            本地法规库未命中以下引用
+          </div>
+          <div className="mt-1 leading-relaxed">
+            {items.map((item) => `《${item.codeName}》${item.number}`).join("、")}
+          </div>
+          <div className="mt-1 text-destructive/80">
+            该答复中的上述法条引用不能视为正式依据，请先在“法律依据”中补充法规或重新提问。
+          </div>
+        </div>
+      )}
     </div>
   )
 }

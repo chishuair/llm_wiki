@@ -40,6 +40,46 @@ DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 TITLE_SKIP_RE = re.compile(r"^(目录|正文|附件|法律法规全文|打印|下载)$")
 COOKIE_JAR = http.cookiejar.CookieJar()
 HTTP_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
+CORE_LAW_PROFILES: dict[str, list[str]] = {
+    "court-basic": [
+        "中华人民共和国民法典",
+        "中华人民共和国民法通则",
+        "中华人民共和国民事诉讼法",
+        "中华人民共和国刑事诉讼法",
+        "中华人民共和国行政诉讼法",
+        "中华人民共和国行政处罚法",
+        "中华人民共和国行政强制法",
+        "中华人民共和国行政许可法",
+        "中华人民共和国行政复议法",
+        "中华人民共和国国家赔偿法",
+        "中华人民共和国刑法",
+        "医疗事故处理条例",
+        "医疗事故分级标准（试行）",
+        "最高人民法院关于民事诉讼证据的若干规定",
+        "最高人民法院关于适用《中华人民共和国民事诉讼法》的解释",
+        "最高人民法院关于适用《中华人民共和国民法典》侵权责任编的解释（一）",
+    ],
+    "court-medical": [
+        "中华人民共和国民法典",
+        "中华人民共和国民法通则",
+        "中华人民共和国民事诉讼法",
+        "医疗事故处理条例",
+        "医疗事故分级标准（试行）",
+        "最高人民法院关于民事诉讼证据的若干规定",
+        "最高人民法院关于适用《中华人民共和国民事诉讼法》的解释",
+        "最高人民法院关于适用《中华人民共和国民法典》侵权责任编的解释（一）",
+        "医疗纠纷预防和处理条例",
+        "护士条例",
+        "医疗机构管理条例",
+        "中华人民共和国基本医疗卫生与健康促进法",
+        "中华人民共和国执业医师法",
+    ],
+}
+
+PROFILE_META: dict[str, dict[str, str]] = {
+    "court-basic": {"pack_tier": "core", "topic": "法院通用基础法"},
+    "court-medical": {"pack_tier": "topic", "topic": "医疗纠纷专题"},
+}
 
 
 def today_iso() -> str:
@@ -242,6 +282,47 @@ def parse_law_file(path: Path, source_label: str) -> dict[str, Any]:
     }
 
 
+def classify_hierarchy(code: dict[str, Any]) -> str:
+    name = str(code.get("code") or "")
+    text = " ".join(str(code.get(key) or "") for key in ("code", "source", "version", "issuer", "officialCategory"))
+    local_re = re.compile(
+        r"(北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|内蒙古|广西|西藏|宁夏|新疆|香港|澳门|自治州|自治县|自治旗|地区|盟|市)"
+    )
+    official = str(code.get("officialCategory") or "")
+    if official in {"法律", "行政法规", "司法解释"}:
+        return "司法解释与两高规范性文件" if official == "司法解释" else official
+    if "最高人民法院" in text or "最高人民检察院" in text or "司法解释" in text or "关于审理" in name or "适用法律" in name:
+        return "司法解释与两高规范性文件"
+    if re.match(r"^中华人民共和国.+法$", name) or re.match(r"^中华人民共和国.+法实施", name):
+        return "法律"
+    if "国务院" in text or (name.endswith("条例") and not local_re.search(text[:160])):
+        return "行政法规"
+    if local_re.search(text[:180]):
+        return "地方性法规、自治条例和单行条例"
+    if re.search(r"(决定|规定|办法|规则|条例)$", name):
+        return "其他规范性文件"
+    return "其他"
+
+
+def apply_download_metadata(code: dict[str, Any], meta: dict[str, Any] | None) -> dict[str, Any]:
+    if not meta:
+        code["hierarchyLevel"] = classify_hierarchy(code)
+        return code
+    if meta.get("zdjgName"):
+        code["issuer"] = meta.get("zdjgName")
+    if meta.get("flxz"):
+        code["officialCategory"] = meta.get("flxz")
+    if meta.get("gbrq"):
+        code["promulgationDate"] = meta.get("gbrq")
+    if meta.get("sxrq"):
+        code["sourceEffectiveDate"] = meta.get("sxrq")
+        code["effective"] = code.get("effective") or meta.get("sxrq")
+    if meta.get("bbbs"):
+        code["sourceId"] = meta.get("bbbs")
+    code["hierarchyLevel"] = classify_hierarchy(code)
+    return code
+
+
 def download_file(url: str, raw_dir: Path, delay_seconds: float) -> Path:
     parsed = urllib.parse.urlparse(url)
     filename = Path(urllib.parse.unquote(parsed.path)).name or "download.docx"
@@ -304,6 +385,57 @@ def flk_list_page(page: int, page_size: int, search_content: str = "") -> dict[s
         "pageSize": page_size,
     }
     return http_json("https://flk.npc.gov.cn/law-search/search/list", method="POST", payload=payload)
+
+
+def download_named_laws(args: argparse.Namespace, raw_dir: Path) -> None:
+    if not args.core_profile:
+        return
+    names = CORE_LAW_PROFILES.get(args.core_profile)
+    if not names:
+        raise RuntimeError(f"unknown core profile: {args.core_profile}")
+    index_path = raw_dir.parent / "download-index.json"
+    download_index: dict[str, Any] = load_json_file(index_path, {})
+    print(f"[core-profile] {args.core_profile}: {len(names)} laws")
+    for name in names:
+        data = flk_list_page(1, 10, name)
+        rows = data.get("rows") or []
+        target_row = next((row for row in rows if str(row.get("title") or "").strip() == name.strip()), rows[0] if rows else None)
+        if not target_row:
+            print(f"  [missing] {name}", file=sys.stderr)
+            continue
+        bbbs = str(target_row.get("bbbs") or "").strip()
+        if not bbbs:
+            print(f"  [missing-id] {name}", file=sys.stderr)
+            continue
+        known = download_index.get(bbbs)
+        if known:
+            known_name = str(known.get("filename") or "")
+            if known_name and (raw_dir / known_name).exists():
+                print(f"  [skip] {name}")
+                continue
+        url = flk_download_url(bbbs, "docx")
+        filename = safe_filename(f"{name}_{target_row.get('gbrq') or ''}.docx")
+        target = raw_dir / filename
+        if target.exists():
+            target = raw_dir / safe_filename(f"{name}_{bbbs}_{target_row.get('gbrq') or ''}.docx")
+        download_to_file(url, target, timeout=90, retries=args.discover_retries)
+        download_index[bbbs] = {
+            "title": name,
+            "filename": target.name,
+            "bbbs": bbbs,
+            "gbrq": target_row.get("gbrq"),
+            "sxrq": target_row.get("sxrq"),
+            "flxz": target_row.get("flxz"),
+            "zdjgName": target_row.get("zdjgName"),
+            "flfgCodeId": target_row.get("flfgCodeId"),
+            "zdjgCodeId": target_row.get("zdjgCodeId"),
+            "updated_at": today_iso(),
+            "from_core_profile": args.core_profile,
+        }
+        save_json_file(index_path, download_index)
+        print(f"  [download] {name} -> {target.name}")
+        if args.delay > 0:
+            time.sleep(args.delay)
 
 
 def is_temporary_redirect_error(exc: Exception) -> bool:
@@ -395,6 +527,7 @@ def retry_discover_failures(args: argparse.Namespace, raw_dir: Path) -> tuple[in
             download_index[bbbs] = {
                 "title": title,
                 "filename": target.name,
+                "bbbs": bbbs,
                 "updated_at": today_iso(),
                 "from_retry_failures": True,
             }
@@ -501,7 +634,13 @@ def download_flk_discovered(args: argparse.Namespace, raw_dir: Path) -> None:
                 download_index[bbbs] = {
                     "title": title,
                     "filename": target.name,
+                    "bbbs": bbbs,
                     "gbrq": row.get("gbrq"),
+                    "sxrq": row.get("sxrq"),
+                    "flxz": row.get("flxz"),
+                    "zdjgName": row.get("zdjgName"),
+                    "flfgCodeId": row.get("flfgCodeId"),
+                    "zdjgCodeId": row.get("zdjgCodeId"),
                     "updated_at": today_iso(),
                 }
                 save_json_file(index_path, download_index)
@@ -611,6 +750,9 @@ def build_pack(args: argparse.Namespace) -> None:
     if args.retry_failures:
         retry_fixed, retry_remain = retry_discover_failures(args, raw_dir)
 
+    if args.core_profile:
+        download_named_laws(args, raw_dir)
+
     if args.discover_flk:
         download_flk_discovered(args, raw_dir)
 
@@ -633,6 +775,13 @@ def build_pack(args: argparse.Namespace) -> None:
             target = raw_dir / source.name
             if source.resolve() != target.resolve():
                 shutil.copy2(source, target)
+
+    download_index = load_json_file(output_dir / "download-index.json", {})
+    source_metadata: dict[str, dict[str, Any]] = {}
+    if isinstance(download_index, dict):
+        for item in download_index.values():
+            if isinstance(item, dict) and item.get("filename"):
+                source_metadata[str(item.get("filename"))] = item
 
     compile_state = collect_compile_state(compile_state_path)
     compiled_files: dict[str, Any] = compile_state.get("files") or {}
@@ -663,7 +812,7 @@ def build_pack(args: argparse.Namespace) -> None:
             reused += 1
             continue
         try:
-            code = parse_law_file(source, source.name)
+            code = apply_download_metadata(parse_law_file(source, source.name), source_metadata.get(source.name))
             codes_by_source[source.name] = code
             compiled_path = compiled_dir / f"{safe_filename(code['code'])}.json"
             compiled_path.write_text(json.dumps(code, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -691,6 +840,9 @@ def build_pack(args: argparse.Namespace) -> None:
         "source": args.source,
         "version": args.version or dt.date.today().isoformat(),
         "generated_at": today_iso(),
+        "pack_tier": PROFILE_META.get(args.core_profile, {}).get("pack_tier", "full" if args.discover_flk else ""),
+        "pack_profile": args.core_profile or None,
+        "topic": PROFILE_META.get(args.core_profile, {}).get("topic"),
         "laws_count": len(codes),
         "latest_effective": latest_effective(codes) or None,
         "retry_failures_fixed": retry_fixed or None,
@@ -730,6 +882,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-consecutive-download-failures", type=int, default=8, help="Cooldown after this many consecutive per-law download failures.")
     parser.add_argument("--retry-failures", action="store_true", help="Retry entries from download-failures.json before discover/compile.")
     parser.add_argument("--compile-incremental", action="store_true", help="Compile only changed/new raw files and reuse previous compiled results.")
+    parser.add_argument("--core-profile", default="", help="Download a predefined core law profile before discover/compile. Example: court-basic")
     return parser.parse_args()
 
 

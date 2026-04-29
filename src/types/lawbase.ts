@@ -35,6 +35,16 @@ export interface LawCode {
   version?: string
   /** 立法机关 / 颁布机关 */
   issuer?: string
+  /** 官方法规性质/类别，例如 法律、行政法规、司法解释、地方性法规 */
+  officialCategory?: string
+  /** 应用内展示用效力层级 */
+  hierarchyLevel?: "法律" | "行政法规" | "司法解释与两高规范性文件" | "地方性法规、自治条例和单行条例" | "其他规范性文件" | "其他"
+  /** 公布日期（YYYY-MM-DD），来自官方列表字段 gbrq */
+  promulgationDate?: string
+  /** 官方列表中的施行日期（YYYY-MM-DD），来自 sxrq */
+  sourceEffectiveDate?: string
+  /** 官方数据库条目标识，例如 FLK 的 bbbs */
+  sourceId?: string
   /** 条文列表 */
   articles: LawArticle[]
   /** 可选：来源文件名或官方下载地址 */
@@ -48,6 +58,9 @@ export interface LawbasePackManifest {
   source: string
   version: string
   generated_at: string
+  pack_tier?: "core" | "topic" | "full"
+  pack_profile?: string
+  topic?: string
   laws_count?: number
   latest_effective?: string
 }
@@ -55,6 +68,11 @@ export interface LawbasePackManifest {
 export interface LawbasePack {
   manifest: LawbasePackManifest
   codes: LawCode[]
+}
+
+export interface InstalledLawPack extends LawbasePackManifest {
+  installed_at: string
+  source_kind?: "preloaded" | "manual-import"
 }
 
 /** 一次检索命中的条目（含匹配的法律信息，便于 UI 展示）。 */

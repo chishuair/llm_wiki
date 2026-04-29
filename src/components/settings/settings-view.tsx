@@ -3,6 +3,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { getOcrStatus, type OcrStatus } from "@/commands/fs"
 
 export function SettingsView() {
   const llmConfig = useWikiStore((s) => s.llmConfig)
@@ -13,12 +14,29 @@ export function SettingsView() {
   const [apiKey, setApiKey] = useState(llmConfig.apiKey || "")
   const [model, setModel] = useState(llmConfig.model || "qwen2.5:14b")
   const [saved, setSaved] = useState(false)
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus | null>(null)
+  const [checkingOcr, setCheckingOcr] = useState(false)
 
   useEffect(() => {
     setEndpoint(llmConfig.customEndpoint || llmConfig.ollamaUrl || "http://localhost:11434")
     setApiKey(llmConfig.apiKey || "")
     setModel(llmConfig.model || "qwen2.5:14b")
   }, [llmConfig.customEndpoint, llmConfig.ollamaUrl, llmConfig.apiKey, llmConfig.model])
+
+  async function refreshOcrStatus() {
+    setCheckingOcr(true)
+    try {
+      setOcrStatus(await getOcrStatus())
+    } catch {
+      setOcrStatus({ paddleocr: false, tesseract: false, ocrmypdf: false })
+    } finally {
+      setCheckingOcr(false)
+    }
+  }
+
+  useEffect(() => {
+    refreshOcrStatus()
+  }, [])
 
   async function handleSave() {
     const { saveLlmConfig } = await import("@/lib/project-store")
@@ -105,7 +123,41 @@ export function SettingsView() {
         <Button onClick={handleSave} className="w-full">
           {saved ? "已保存" : "保存设置"}
         </Button>
+
+        <div className="space-y-4 rounded-lg border p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="font-semibold">OCR 识别环境</h3>
+              <p className="text-xs text-muted-foreground">
+                图片和扫描 PDF 优先使用 PaddleOCR；未安装时回退 Tesseract / ocrmypdf。
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={refreshOcrStatus} disabled={checkingOcr}>
+              {checkingOcr ? "检测中…" : "重新检测"}
+            </Button>
+          </div>
+          <div className="grid gap-2 text-sm">
+            <OcrStatusRow name="PaddleOCR（推荐）" ok={ocrStatus?.paddleocr} />
+            <OcrStatusRow name="Tesseract（兜底）" ok={ocrStatus?.tesseract} />
+            <OcrStatusRow name="ocrmypdf（扫描 PDF 兜底）" ok={ocrStatus?.ocrmypdf} />
+          </div>
+          <div className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground">
+            离线安装示例：<code>python3 -m pip install paddlepaddle paddleocr</code>。
+            法院内网环境建议提前准备 wheel 包和模型文件。
+          </div>
+        </div>
       </div>
+    </div>
+  )
+}
+
+function OcrStatusRow({ name, ok }: { name: string; ok?: boolean }) {
+  return (
+    <div className="flex items-center justify-between rounded-md border px-3 py-2">
+      <span>{name}</span>
+      <span className={ok ? "text-emerald-500" : "text-muted-foreground"}>
+        {ok ? "已安装" : "未检测到"}
+      </span>
     </div>
   )
 }

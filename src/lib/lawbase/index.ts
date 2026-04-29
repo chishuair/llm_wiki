@@ -1,11 +1,12 @@
 import { load } from "@tauri-apps/plugin-store"
-import type { LawArticle, LawCode, LawSearchHit, LawbasePackManifest } from "@/types/lawbase"
+import { readPreloadedLawPack } from "@/commands/fs"
+import type { InstalledLawPack, LawArticle, LawCode, LawSearchHit, LawbasePackManifest } from "@/types/lawbase"
+import type { LawbasePack } from "@/types/lawbase"
 
 /**
  * 离线法条库运行时索引。
  *
- * - 所有法律都保存在进程内存中，数据来源完全由法官通过「导入法律」操作
- *   提供，不内置任何预置条文，避免因数据不准确影响办案；
+ * - 所有法律都保存在进程内存中，支持读取随应用打包的离线法规包；
  * - 导入后的 JSON 会持久化到 Tauri plugin-store（app-state.json
  *   的 `lawbase.v1` 键下），重启自动恢复；
  * - 提供按条号精确定位、按关键字模糊搜索两种能力。
@@ -14,9 +15,11 @@ import type { LawArticle, LawCode, LawSearchHit, LawbasePackManifest } from "@/t
 const STORE_NAME = "app-state.json"
 const STORE_KEY = "lawbase.v1"
 const PACK_STORE_KEY = "lawbase.packManifest.v1"
+const PACK_LIST_STORE_KEY = "lawbase.packList.v1"
 
 let codes: LawCode[] = []
 let packManifest: LawbasePackManifest | null = null
+let installedPacks: InstalledLawPack[] = []
 const codeByName: Map<string, LawCode> = new Map()
 let loaded = false
 const listeners = new Set<() => void>()
@@ -60,13 +63,50 @@ export async function loadLawbase(): Promise<void> {
     const store = await getStore()
     const data = (await store.get<LawCode[]>(STORE_KEY)) ?? []
     packManifest = (await store.get<LawbasePackManifest>(PACK_STORE_KEY)) ?? null
+    installedPacks = (await store.get<InstalledLawPack[]>(PACK_LIST_STORE_KEY)) ?? []
     codes = Array.isArray(data) ? data : []
   } catch {
     codes = []
+    installedPacks = []
   }
+  await ensurePreloadedPack()
   buildIndex()
   loaded = true
   notify()
+}
+
+async function ensurePreloadedPack(): Promise<void> {
+  try {
+    const raw = await readPreloadedLawPack()
+    const parsed = JSON.parse(raw) as LawbasePack
+    if (!parsed.manifest || !Array.isArray(parsed.codes) || parsed.codes.length === 0) return
+    if (codes.length >= parsed.codes.length && packManifest?.version === parsed.manifest.version) return
+
+    const byName = new Map(codes.map((code) => [normalizeName(code.code), code]))
+    for (const code of parsed.codes) {
+      byName.set(normalizeName(code.code), {
+        ...code,
+        source: code.source || parsed.manifest.source,
+        importedAt: code.importedAt || parsed.manifest.generated_at,
+      })
+    }
+    codes = [...byName.values()]
+    packManifest = {
+      ...parsed.manifest,
+      laws_count: parsed.manifest.laws_count ?? parsed.codes.length,
+    }
+    installedPacks = mergeInstalledPacks(installedPacks, {
+      ...packManifest,
+      installed_at: new Date().toISOString(),
+      source_kind: "preloaded",
+    })
+    const store = await getStore()
+    await store.set(STORE_KEY, codes)
+    await store.set(PACK_STORE_KEY, packManifest)
+    await store.set(PACK_LIST_STORE_KEY, installedPacks)
+  } catch {
+    // 没有预置法规包时保持手动导入模式，不影响应用启动。
+  }
 }
 
 async function persist(): Promise<void> {
@@ -84,6 +124,21 @@ export function listCodes(): LawCode[] {
 
 export function getPackManifest(): LawbasePackManifest | null {
   return packManifest ? { ...packManifest } : null
+}
+
+export function getInstalledPacks(): InstalledLawPack[] {
+  return [...installedPacks]
+}
+
+function mergeInstalledPacks(
+  current: InstalledLawPack[],
+  next: InstalledLawPack
+): InstalledLawPack[] {
+  const keyOf = (item: InstalledLawPack) =>
+    `${item.dataset_name}::${item.version}::${item.pack_profile ?? ""}::${item.pack_tier ?? ""}`
+  const nextKey = keyOf(next)
+  const remaining = current.filter((item) => keyOf(item) !== nextKey)
+  return [next, ...remaining]
 }
 
 /** 校验一个 LawCode 对象是否满足最小必需字段 */
@@ -117,6 +172,13 @@ export function validateLawCode(value: unknown): { ok: true; code: LawCode } | {
     effective: typeof v.effective === "string" ? v.effective : undefined,
     version: typeof v.version === "string" ? v.version : undefined,
     issuer: typeof v.issuer === "string" ? v.issuer : undefined,
+    officialCategory: typeof v.officialCategory === "string" ? v.officialCategory : undefined,
+    hierarchyLevel: typeof v.hierarchyLevel === "string" ? v.hierarchyLevel as LawCode["hierarchyLevel"] : undefined,
+    promulgationDate: typeof v.promulgationDate === "string" ? v.promulgationDate : undefined,
+    sourceEffectiveDate: typeof v.sourceEffectiveDate === "string" ? v.sourceEffectiveDate : undefined,
+    sourceId: typeof v.sourceId === "string" ? v.sourceId : undefined,
+    source: typeof v.source === "string" ? v.source : undefined,
+    importedAt: typeof v.importedAt === "string" ? v.importedAt : undefined,
     articles: (v.articles as Record<string, unknown>[]).map((a) => ({
       number: String(a.number).trim(),
       content: String(a.content).trim(),
@@ -173,10 +235,16 @@ export async function importLawPack(
     ...manifest,
     laws_count: manifest.laws_count ?? packCodes.length,
   }
+  installedPacks = mergeInstalledPacks(installedPacks, {
+    ...packManifest,
+    installed_at: new Date().toISOString(),
+    source_kind: "manual-import",
+  })
   buildIndex()
   const store = await getStore()
   await store.set(STORE_KEY, codes)
   await store.set(PACK_STORE_KEY, packManifest)
+  await store.set(PACK_LIST_STORE_KEY, installedPacks)
   notify()
   return { added, replaced }
 }

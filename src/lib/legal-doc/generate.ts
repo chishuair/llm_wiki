@@ -1,6 +1,6 @@
 import type { LlmConfig } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage } from "@/lib/llm-client"
-import { buildLawbasePromptSection, detectMissingLawbaseSignal } from "@/lib/lawbase/prompt"
+import { buildLawbasePromptSection, buildRelevantLawArticlesSection, detectMissingLawbaseSignal, suggestMissingLawNames } from "@/lib/lawbase/prompt"
 import { validateCitations } from "@/lib/lawbase/citations"
 import { buildSectionWorksheetContext } from "@/lib/legal-doc/worksheet-mapping"
 import type {
@@ -38,14 +38,15 @@ export async function generateLegalDocument(
   for (const section of template.sections) {
     opts.onSectionStart?.(section.id)
     const rawContent = await renderSection(section, caseContext, llmConfig, opts, signal)
-    // 说理 / 法律依据类章节，生成后自动校验引用，并在末尾附上已命中法条原文，
-    // 便于法官一眼核对。库缺情况由 UI 层横幅处理，此处不再干预文本。
-    const content = section.kind === "llm" ? annotateCitations(rawContent) : rawContent
+    const annotation = section.kind === "llm" ? buildCitationAnnotation(rawContent) : null
+    const content = annotation ? annotation.content : rawContent
     const g: GeneratedSection = {
       id: section.id,
       heading: section.heading,
       content,
       source: section.kind,
+      citedLawLines: annotation?.citedLawLines,
+      contextSummary: annotation?.contextSummary,
     }
     sections.push(g)
     opts.onSectionDone?.(g)
@@ -95,8 +96,17 @@ async function generateSectionWithLlm(
   signal?: AbortSignal
 ): Promise<string> {
   const lawbaseGuard = buildLawbasePromptSection()
-  const caseDump = buildCaseDump(ctx)
+  const caseDump = buildCaseDump(ctx, section)
   const worksheetContext = buildSectionWorksheetContext(section, ctx.hearing_worksheet)
+  const relevantLawContext = buildRelevantLawArticlesSection([
+    section.heading,
+    section.prompt ?? "",
+    worksheetContext,
+    ctx.disputes,
+    ctx.facts,
+    ctx.evidence_list,
+    ctx.hearing_worksheet,
+  ].join("\n"), 30)
 
   const messages: ChatMessage[] = [
     {
@@ -118,7 +128,7 @@ async function generateSectionWithLlm(
         "- 不得使用未出现在这些材料里的当事人姓名、时间、金额、标的物或主张。",
         "",
         "## 第二优先：严格按本地法条库引用",
-        "- 所有法律引用必须落在本条消息前 system 消息列出的「本地法条库」中，包括但不限于法律名、条号、条文含义。",
+        "- 所有法律引用必须落在下方「本次检索到的本地法条」中，包括但不限于法律名、条号、条文含义。",
         "- 一旦库里缺少可适用的条款，严格按约束输出库缺标识，并停止输出该段的法律结论。",
         "- 不得凭语言模型记忆引用任何外部法律条文。",
         "",
@@ -139,6 +149,8 @@ async function generateSectionWithLlm(
         "",
         "## 章节优先参考的开庭工作单内容",
         worksheetContext || "（当前章节没有单独映射到开庭工作单内容）",
+        "",
+        relevantLawContext,
         "",
         "## 案件材料",
         caseDump,
@@ -175,12 +187,24 @@ async function generateSectionWithLlm(
  *
  * 返回新的文本。若不存在任何引用则原样返回。
  */
-function annotateCitations(text: string): string {
-  if (!text) return text
-  // 模型输出了库缺标识时直接返回，不加附注
-  if (detectMissingLawbaseSignal(text)) return text
+function buildCitationAnnotation(text: string): { content: string; citedLawLines: string[]; contextSummary: string; suggestedMissingLawNames?: string[] } | null {
+  if (!text) return null
+  if (detectMissingLawbaseSignal(text)) {
+    return {
+      content: text,
+      citedLawLines: [],
+      contextSummary: "本节未检索到可直接适用的本地法条，模型已返回法规缺失提示。",
+      suggestedMissingLawNames: suggestMissingLawNames(text),
+    }
+  }
   const validations = validateCitations(text)
-  if (validations.length === 0) return text
+  if (validations.length === 0) {
+    return {
+      content: text,
+      citedLawLines: [],
+      contextSummary: "本节未出现明确法条引用；上下文已按章节预算裁剪并注入。",
+    }
+  }
   const seen = new Set<string>()
   const validHits = validations.filter((c) => {
     if (!c.valid || !c.article || !c.code) return false
@@ -189,16 +213,40 @@ function annotateCitations(text: string): string {
     seen.add(key)
     return true
   })
-  if (validHits.length === 0) return text
+  const invalidHits = validations.filter((c) => !c.valid)
+  const citedLawLines = validHits.map((hit) => `《${hit.code?.aliases?.[0] ?? hit.code?.code}》${hit.article?.number}`)
+  if (validHits.length === 0) {
+    return {
+      content: text,
+      citedLawLines: [],
+      contextSummary: `本节出现 ${invalidHits.length} 处未命中本地法规库的引用，请人工复核。`,
+      suggestedMissingLawNames: suggestMissingLawNames(text),
+    }
+  }
   const lines = ["", "——引用依据——"]
   for (const hit of validHits) {
     if (!hit.code || !hit.article) continue
     lines.push(`《${hit.code.aliases?.[0] ?? hit.code.code}》${hit.article.number}：${hit.article.content}`)
   }
-  return `${text.trimEnd()}\n${lines.join("\n")}`
+  return {
+    content: `${text.trimEnd()}\n${lines.join("\n")}`,
+    citedLawLines,
+    contextSummary: `本节已校验通过 ${validHits.length} 处法条引用；${invalidHits.length} 处未命中引用需人工复核。`,
+    suggestedMissingLawNames: invalidHits.length > 0 ? suggestMissingLawNames(text) : [],
+  }
 }
 
-function buildCaseDump(ctx: CaseContext): string {
+function buildCaseDump(ctx: CaseContext, section: LegalDocSection): string {
+  const STRUCTURED_SECTION_BUDGET = 22000
+  const RAW_SECTION_BUDGET = 18000
+  const PER_ENTRY_BUDGET = 2800
+  const PER_RAW_FILE_BUDGET = 4200
+
+  const sectionQuery = [
+    section.heading,
+    section.prompt ?? "",
+  ].join("\n")
+
   const entries: Array<[string, string]> = [
     ["案件名称", ctx.projectName],
     ["案号（若为空由法官在预览中补全）", ctx.case_number],
@@ -214,24 +262,68 @@ function buildCaseDump(ctx: CaseContext): string {
     ["本院认为（法官已有的思路）", ctx.reasoning],
     ["判决结果（法官已有的要点）", ctx.judgment],
   ]
-  const structured = entries
-    .map(([label, value]) => `### ${label}\n${value || "（知识库中暂无）"}`)
-    .join("\n\n")
+
+  let structuredUsed = 0
+  const structuredBlocks: string[] = []
+  for (const [label, value] of entries) {
+    const text = (value || "（知识库中暂无）").trim()
+    if (!text) continue
+    const clipped = text.length > PER_ENTRY_BUDGET ? `${text.slice(0, PER_ENTRY_BUDGET)}\n（本节上下文已裁剪）` : text
+    const block = `### ${label}\n${clipped}`
+    if (structuredUsed + block.length > STRUCTURED_SECTION_BUDGET) break
+    structuredBlocks.push(block)
+    structuredUsed += block.length
+  }
+  const structured = structuredBlocks.join("\n\n")
 
   if (!ctx.raw_sources || ctx.raw_sources.length === 0) {
     return structured + "\n\n### raw/sources 原始材料\n（案件无原始材料）"
   }
 
+  const rankedRaw = rankRawSourcesForSection(ctx.raw_sources, sectionQuery)
   const rawLines: string[] = [
     "### raw/sources 原始材料（法官上传的原件）",
-    `共 ${ctx.raw_sources.length} 份文件。长文件已由 LLM 提炼为事实提要（不改变事实）；短文件使用原件全文。`,
+    `共 ${ctx.raw_sources.length} 份文件。当前仅注入与本章节最相关的部分材料，避免超出模型请求体限制。`,
     "",
   ]
-  for (const file of ctx.raw_sources) {
+
+  let rawUsed = 0
+  let included = 0
+  for (const file of rankedRaw) {
     const useSummary = file.needsSummary && file.summary
-    rawLines.push(`#### 文件：${file.relativePath}（${useSummary ? "提要" : "全文"}，原文 ${file.size.toLocaleString()} 字）`)
-    rawLines.push(useSummary ? (file.summary as string) : file.text)
-    rawLines.push("")
+    const content = useSummary ? (file.summary as string) : file.text
+    const clipped = content.length > PER_RAW_FILE_BUDGET ? `${content.slice(0, PER_RAW_FILE_BUDGET)}\n（该材料在本章节中已裁剪）` : content
+    const block = `#### 文件：${file.relativePath}（${useSummary ? "提要" : "全文"}，原文 ${file.size.toLocaleString()} 字）\n${clipped}\n`
+    if (rawUsed + block.length > RAW_SECTION_BUDGET) break
+    rawLines.push(block)
+    rawUsed += block.length
+    included += 1
+  }
+  if (included < rankedRaw.length) {
+    rawLines.push(`（其余 ${rankedRaw.length - included} 份材料未纳入本章节上下文，可在其他章节或重新生成时继续参考。）`)
   }
   return `${structured}\n\n${rawLines.join("\n")}`
+}
+
+function rankRawSourcesForSection(files: CaseContext["raw_sources"], query: string): CaseContext["raw_sources"] {
+  const tokens = extractBudgetTokens(query)
+  return [...files].sort((a, b) => scoreRawForSection(b, tokens) - scoreRawForSection(a, tokens))
+}
+
+function extractBudgetTokens(text: string): string[] {
+  const normalized = text.toLowerCase()
+  const zh = normalized.match(/[\u4e00-\u9fff]{2,8}/g) ?? []
+  const en = normalized.match(/[a-z]{3,}/g) ?? []
+  return [...new Set([...zh, ...en])].slice(0, 24)
+}
+
+function scoreRawForSection(file: CaseContext["raw_sources"][number], tokens: string[]): number {
+  const haystack = `${file.name}\n${file.summary ?? ""}\n${file.text.slice(0, 6000)}`.toLowerCase()
+  let score = file.needsSummary && file.summary ? 20 : 10
+  for (const token of tokens) {
+    if (haystack.includes(token)) score += token.length >= 4 ? 8 : 4
+  }
+  // 稍微优先更短的材料，便于装入预算
+  if (file.size < 6000) score += 5
+  return score
 }

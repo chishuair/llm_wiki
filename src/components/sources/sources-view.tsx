@@ -11,6 +11,7 @@ import { startIngest } from "@/lib/ingest"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
 import { useTranslation } from "react-i18next"
 import { normalizePath, getFileName } from "@/lib/path-utils"
+import { routeImportedMaterials } from "@/lib/hearing/material-router"
 
 export function SourcesView() {
   const { t } = useTranslation()
@@ -95,8 +96,6 @@ export function SourcesView() {
       try {
         await copyFile(sourcePath, destPath)
         importedPaths.push(destPath)
-        // Pre-process file (extract text from PDF, etc.) for instant preview later
-        preprocessFile(destPath).catch(() => {})
       } catch (err) {
         console.error(`Failed to import ${originalName}:`, err)
       }
@@ -105,13 +104,66 @@ export function SourcesView() {
     setImporting(false)
     await loadSources()
 
-    // Enqueue for serial ingest (runs in background via ingest queue)
-    if (llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom") {
-      for (const destPath of importedPaths) {
-        enqueueIngest(pp, destPath).catch((err) =>
-          console.error(`Failed to enqueue ingest:`, err)
-        )
-      }
+    if (importedPaths.length > 0) {
+      routeImportedMaterials({
+        projectPath: pp,
+        sourcePaths: importedPaths,
+        llmConfig,
+        onRouted: async (routed) => {
+          await loadSources()
+          if (llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom") {
+            for (const item of routed.filter((entry) => entry.kind === "other")) {
+              enqueueIngest(pp, item.path).catch((err) =>
+                console.error(`Failed to enqueue ingest:`, err)
+              )
+            }
+          }
+        },
+      }).catch((err) => {
+        console.error("Failed to route imported materials:", err)
+        for (const destPath of importedPaths) {
+          preprocessFile(destPath).catch(() => {})
+        }
+      })
+    }
+  }
+
+  function buildFolderContext(filePath: string, baseDir: string, folderName: string) {
+    const normFilePath = normalizePath(filePath)
+    const normBaseDir = normalizePath(baseDir)
+    const relPath = normFilePath.replace(normBaseDir + "/", "")
+    const parts = relPath.split("/")
+    parts.pop()
+    return parts.length > 0 ? `${folderName} > ${parts.join(" > ")}` : folderName
+  }
+
+  function isIngestibleFile(filePath: string) {
+    const ext = filePath.split(".").pop()?.toLowerCase() ?? ""
+    return ["md", "mdx", "txt", "pdf", "docx", "pptx", "xlsx", "xls",
+            "csv", "json", "html", "htm", "rtf", "xml", "yaml", "yml"].includes(ext)
+  }
+
+  function llmReady() {
+    return Boolean(llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom")
+  }
+
+  async function enqueueOtherMaterials(
+    routed: Array<{ kind: string; path: string; originalPath: string }>,
+    projectPath: string,
+    destDir: string,
+    folderName: string,
+  ) {
+    if (!llmReady()) return
+    const tasks = routed
+      .filter((item) => item.kind === "other" && isIngestibleFile(item.path))
+      .map((item) => ({
+        sourcePath: item.path,
+        folderContext: buildFolderContext(item.originalPath, destDir, folderName),
+      }))
+
+    if (tasks.length > 0) {
+      await enqueueBatch(projectPath, tasks)
+      console.log(`[Folder Import] Enqueued ${tasks.length} other files for ingest`)
     }
   }
 
@@ -139,43 +191,24 @@ export function SourcesView() {
 
       console.log(`[Folder Import] Copied ${copiedFiles.length} files from ${folderName}`)
 
-      // Preprocess all files
-      for (const filePath of copiedFiles) {
-        preprocessFile(filePath).catch(() => {})
-      }
-
       setImporting(false)
       await loadSources()
 
-      // Build ingest tasks with folder context
-      if (llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom") {
-        const tasks = copiedFiles
-          .filter((fp) => {
-            const ext = fp.split(".").pop()?.toLowerCase() ?? ""
-            // Only ingest text-based files, skip images/media
-            return ["md", "mdx", "txt", "pdf", "docx", "pptx", "xlsx", "xls",
-                    "csv", "json", "html", "htm", "rtf", "xml", "yaml", "yml"].includes(ext)
-          })
-          .map((filePath) => {
-            // Build folder context from relative path. On Windows the
-            // Rust-returned filePath uses backslashes while destDir was
-            // composed with forward slashes — normalize both sides before
-            // the replace so this works on every platform.
-            const normFilePath = normalizePath(filePath)
-            const normDestDir = normalizePath(destDir)
-            const relPath = normFilePath.replace(normDestDir + "/", "")
-            const parts = relPath.split("/")
-            parts.pop() // remove filename
-            const context = parts.length > 0
-              ? `${folderName} > ${parts.join(" > ")}`
-              : folderName
-            return { sourcePath: filePath, folderContext: context }
-          })
-
-        if (tasks.length > 0) {
-          await enqueueBatch(pp, tasks)
-          console.log(`[Folder Import] Enqueued ${tasks.length} files for ingest`)
-        }
+      if (copiedFiles.length > 0) {
+        routeImportedMaterials({
+          projectPath: pp,
+          sourcePaths: copiedFiles,
+          llmConfig,
+          onRouted: async (routed) => {
+            await loadSources()
+            await enqueueOtherMaterials(routed, pp, destDir, folderName)
+          },
+        }).catch((err) => {
+          console.error("Failed to route imported folder materials:", err)
+          for (const filePath of copiedFiles) {
+            preprocessFile(filePath).catch(() => {})
+          }
+        })
       }
     } catch (err) {
       console.error(`Failed to import folder:`, err)
@@ -466,6 +499,40 @@ function countFiles(nodes: FileNode[]): number {
   return count
 }
 
+function inferMaterialType(name: string): string {
+  const lower = name.toLowerCase()
+  if (/起诉状|起诉书|诉状/.test(name)) return "起诉材料"
+  if (/答辩状|答辩书/.test(name)) return "答辩材料"
+  if (/证据|举证|凭证|发票|合同|收据|转账|聊天记录|微信|照片|截图/.test(name)) return "证据材料"
+  if (/笔录|庭审|询问|讯问|谈话/.test(name)) return "庭审/笔录"
+  if (/判决书|裁定书|调解书|决定书/.test(name)) return "裁判文书"
+  if (/鉴定|评估|审计|检验|检测/.test(name)) return "鉴定/评估"
+  if (/\.(png|jpe?g|webp|bmp|tiff?|heic|heif)$/i.test(lower)) return "图片/扫描件"
+  if (/\.pdf$/i.test(lower)) return "PDF 材料"
+  if (/\.(docx?|rtf|txt|md)$/i.test(lower)) return "文本材料"
+  if (/\.(xlsx?|csv)$/i.test(lower)) return "表格材料"
+  return "其他材料"
+}
+
+function materialStatusHint(name: string): { label: string; tone: "ok" | "warn" | "muted" } {
+  if (/\.(png|jpe?g|webp|bmp|tiff?|heic|heif)$/i.test(name)) {
+    return { label: "需 OCR/核对", tone: "warn" }
+  }
+  if (/\.pdf$/i.test(name)) {
+    return { label: "可预处理/OCR", tone: "warn" }
+  }
+  if (/\.(docx?|txt|md|rtf|xlsx?|csv)$/i.test(name)) {
+    return { label: "可 AI 归纳", tone: "ok" }
+  }
+  return { label: "已归档", tone: "muted" }
+}
+
+function statusClass(tone: "ok" | "warn" | "muted") {
+  if (tone === "ok") return "bg-emerald-500/10 text-emerald-500"
+  if (tone === "warn") return "bg-amber-500/10 text-amber-500"
+  return "bg-muted text-muted-foreground"
+}
+
 function SourceTree({
   nodes,
   onOpen,
@@ -531,6 +598,9 @@ function SourceTree({
           )
         }
 
+        const materialType = inferMaterialType(node.name)
+        const status = materialStatusHint(node.name)
+
         return (
           <div
             key={node.path}
@@ -539,10 +609,16 @@ function SourceTree({
           >
             <button
               onClick={() => onOpen(node)}
-              className="flex flex-1 items-center gap-2 truncate px-2 py-1 text-left"
+              className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-left"
             >
               <FileText className="h-4 w-4 shrink-0" />
-              <span className="truncate">{node.name}</span>
+              <span className="min-w-0 flex-1 truncate">{node.name}</span>
+              <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+                {materialType}
+              </span>
+              <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] ${statusClass(status.tone)}`}>
+                {status.label}
+              </span>
             </button>
             <Button
               variant="ghost"

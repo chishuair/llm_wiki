@@ -168,8 +168,9 @@ export function ChatPanel() {
       // Build system prompt with wiki context using graph-enhanced retrieval
       const systemMessages: LLMMessage[] = []
       // 法条库硬约束：所有 LLM 引用必须来自本地法条库，库空时要求模型直接返回标识
-      const { buildLawbasePromptSection } = await import("@/lib/lawbase/prompt")
+      const { buildLawbasePromptSection, buildRelevantLawArticlesSection } = await import("@/lib/lawbase/prompt")
       systemMessages.push({ role: "system", content: buildLawbasePromptSection() })
+      systemMessages.push({ role: "system", content: buildRelevantLawArticlesSection(text, 24) })
       let queryRefs: { title: string; path: string }[] = []
       let langReminder: string | undefined
       if (project) {
@@ -299,7 +300,7 @@ export function ChatPanel() {
             "- 引用具体页面时使用 `[[页面名]]` 双链；引用事实时用方括号加编号，例如 [1] [2]。",
             "- 在回答的最末尾追加一行隐藏注释列出使用过的页面编号：",
             "  <!-- cited: 1, 3, 5 -->",
-            "- 涉及法律条款时必须遵守前面 system 消息中的「法条库硬约束」，仅引用本地法条库里真实存在的条款。",
+            "- 涉及法律条款时必须遵守前面 system 消息中的「法条库硬约束」和「本次检索到的本地法条」，只能引用本次检索到的条文。",
             "- 回答使用 Markdown 排版，文风简练、客观、庄重。",
             "",
             purpose ? `## 知识库目标\n${purpose}` : "",

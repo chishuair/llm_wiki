@@ -1,6 +1,6 @@
 import { listDirectory, readFile } from "@/commands/fs"
 import { caseStageLabel, loadCaseStageState, type CaseStageId } from "@/lib/case-stage/state"
-import { loadCaseMeta, type CaseMeta } from "@/lib/case-meta"
+import { loadCaseMeta, saveCaseMeta, type CaseMeta } from "@/lib/case-meta"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { listCodes } from "@/lib/lawbase"
 import { loadTranscriptRecord } from "@/lib/transcript/storage"
@@ -63,6 +63,176 @@ function topSummaryLines(body: string, heading: string, limit = 3): string[] {
     .filter((line) => line.startsWith("- "))
     .slice(0, limit)
     .map((line) => line.replace(/^- /, ""))
+}
+
+function normalizeLegalText(text: string): string {
+  return text
+    .replace(/^#+\s*/gm, "")
+    .replace(/[ \t]+/g, "")
+    .replace(/[（]/g, "(")
+    .replace(/[）]/g, ")")
+    .replace(/[\r\n]+/g, "\n")
+}
+
+function isPlaceholder(value: string | undefined): boolean {
+  const text = (value || "").trim()
+  if (!text) return true
+  if (/X{2,}|某|待填|待确认|示例/.test(text)) return true
+  return false
+}
+
+function pickFirstMeaningful(...values: Array<string | undefined>): string {
+  return values.find((value) => !isPlaceholder(value))?.trim() || ""
+}
+
+function extractBestCaseNumber(text: string): string {
+  const pattern = /[（(]\d{4}[）)][^ \n，。；]{0,30}(?:民初|民终|民申|民再|刑初|刑终|刑申|行初|行终|行申|执|执异|执复)[^ \n，。；]{0,30}号/g
+  const matches = [...text.matchAll(pattern)]
+    .map((m) => m[0])
+    .filter((value) => !isPlaceholder(value))
+  return matches[0] || ""
+}
+
+function extractBestCause(frontmatterTitle: string, text: string): string {
+  const fromTitle = frontmatterTitle.match(/([一-龥]{2,20}(?:纠纷|争议))/)?.[1]
+  if (fromTitle) return fromTitle
+  const matches = [...text.matchAll(/([一-龥]{2,20}(?:纠纷|争议))一案/g)]
+    .map((m) => m[1].trim())
+    .sort((a, b) => a.length - b.length)
+  return matches[0] || ""
+}
+
+function extractBestPresidingJudge(text: string): string {
+  return text.match(/(?:审判长|审判员|代理审判员)[：:\s]*([一-龥]{2,4}?)(?=(?:审判长|审判员|代理审判员|书记员|$))/)?.[1] || ""
+}
+
+function extractBestClerk(text: string): string {
+  return text.match(/书记员[：:\s]*([一-龥]{2,4}?)(?=(?:附注|记录|$))/)?.[1] || ""
+}
+
+function extractCaseNumberFromText(text: string): string {
+  const pattern = /[（(]\d{4}[）)][^ \n，。；]{0,30}(?:民初|民终|民申|民再|刑初|刑终|刑申|行初|行终|行申|执|执异|执复)[^ \n，。；]{0,30}号/g
+  const matches = [...text.matchAll(pattern)]
+    .map((m) => m[0])
+    .filter((value) => !isPlaceholder(value))
+  return matches[0] || ""
+}
+
+function extractCauseFromText(frontmatterTitle: string, text: string): string {
+  const fromTitle = frontmatterTitle.match(/([一-龥]{2,20}(?:纠纷|争议))/)?.[1]
+  if (fromTitle) return fromTitle
+  const matches = [...text.matchAll(/([一-龥]{2,20}(?:纠纷|争议))一案/g)]
+    .map((m) => m[1].trim())
+    .sort((a, b) => a.length - b.length)
+  return matches[0] || ""
+}
+
+function extractPresidingJudgeFromText(text: string): string {
+  return text.match(/(?:审判长|审判员|代理审判员)[：:\s]*([一-龥]{2,4}?)(?=(?:审判长|审判员|代理审判员|书记员|$))/)?.[1] || ""
+}
+
+function extractClerkFromText(text: string): string {
+  return text.match(/书记员[：:\s]*([一-龥]{2,4}?)(?=(?:附注|记录|$))/)?.[1] || ""
+}
+
+async function hydrateMetaFromMaterials(root: string, meta: CaseMeta): Promise<CaseMeta> {
+  if (
+    !isPlaceholder(meta.caseNumber)
+    && !isPlaceholder(meta.courtName)
+    && !isPlaceholder(meta.cause)
+    && !isPlaceholder(meta.procedureStage)
+  ) {
+    return meta
+  }
+
+  const sourceTree = await listDirectory(`${root}/raw/sources`).catch(() => [] as FileNode[])
+  const cacheTree = await listDirectory(`${root}/raw/sources/.cache`).catch(() => [] as FileNode[])
+  const sourceFiles = flatten(sourceTree)
+    .filter((file) => !file.path.includes("/.cache/") && !file.name.startsWith("."))
+    .slice(0, 10)
+  const cacheFiles = flatten(cacheTree)
+    .filter((file) => file.name.endsWith(".txt"))
+    .slice(0, 10)
+
+  let materialCombined = ""
+  for (const file of sourceFiles) {
+    try {
+      materialCombined += "\n" + await readFile(file.path)
+    } catch {
+      // ignore
+    }
+  }
+  for (const file of cacheFiles) {
+    try {
+      materialCombined += "\n" + await readFile(file.path)
+    } catch {
+      // ignore
+    }
+  }
+
+  const wikiTree = await listDirectory(`${root}/wiki`).catch(() => [] as FileNode[])
+  const mdFiles = flatten(wikiTree)
+    .filter((file) => file.name.endsWith(".md") && !["index.md", "log.md", "overview.md"].includes(file.name))
+    .slice(0, 20)
+  let wikiCombined = ""
+  let frontmatterCaseNumber = ""
+  let frontmatterTitle = ""
+  for (const file of mdFiles) {
+    try {
+      const raw = await readFile(file.path)
+      const parsed = parseFrontmatter(raw)
+      const fm = parsed.data as Record<string, unknown>
+      const fmCaseNo = String(fm?.case_number || "").trim()
+      const fmTitle = String(fm?.title || "").trim()
+      if (!frontmatterCaseNumber && fmCaseNo) frontmatterCaseNumber = fmCaseNo
+      if (!frontmatterTitle && fmTitle) frontmatterTitle = fmTitle
+      wikiCombined += "\n" + parsed.body
+    } catch {
+      // ignore
+    }
+  }
+
+  const materialText = normalizeLegalText(materialCombined)
+  const wikiText = normalizeLegalText(wikiCombined)
+  const caseNumber = pickFirstMeaningful(
+    extractCaseNumberFromText(materialText),
+    frontmatterCaseNumber,
+    extractCaseNumberFromText(wikiText)
+  )
+  const courtName = pickFirstMeaningful(
+    materialText.match(/[^\s，。；]{2,30}人民法院/)?.[0] || "",
+    wikiText.match(/[^\s，。；]{2,30}人民法院/)?.[0] || ""
+  )
+  const cause = pickFirstMeaningful(
+    extractCauseFromText("", materialText),
+    extractCauseFromText(frontmatterTitle, wikiText)
+  )
+  const procedureStage =
+    /民事判决书|刑事判决书|行政判决书/.test(materialText) ? "已裁判"
+      : /民事裁定书|刑事裁定书|行政裁定书/.test(materialText) ? "已裁定"
+        : /开庭笔录|庭审笔录/.test(materialText) ? "已开庭"
+          : /民事判决书|刑事判决书|行政判决书/.test(wikiText) ? "已裁判"
+            : /民事裁定书|刑事裁定书|行政裁定书/.test(wikiText) ? "已裁定"
+              : /开庭笔录|庭审笔录/.test(wikiText) ? "已开庭"
+          : ""
+  const presidingJudge = pickFirstMeaningful(
+    extractPresidingJudgeFromText(materialText),
+    extractPresidingJudgeFromText(wikiText)
+  )
+  const clerk = pickFirstMeaningful(
+    extractClerkFromText(materialText),
+    extractClerkFromText(wikiText)
+  )
+
+  return {
+    ...meta,
+    caseNumber: pickFirstMeaningful(meta.caseNumber, caseNumber),
+    courtName: pickFirstMeaningful(meta.courtName, courtName),
+    cause: pickFirstMeaningful(meta.cause, cause),
+    procedureStage: pickFirstMeaningful(meta.procedureStage, procedureStage),
+    presidingJudge: pickFirstMeaningful(meta.presidingJudge, presidingJudge),
+    clerk: pickFirstMeaningful(meta.clerk, clerk),
+  }
 }
 
 function deriveStage(summary: {
@@ -238,7 +408,11 @@ function buildTodos(summary: {
 
 export async function collectDashboardSummary(project: WikiProject): Promise<DashboardSummary> {
   const root = normalizePath(project.path)
-  const meta = await loadCaseMeta(root, project.name)
+  const loadedMeta = await loadCaseMeta(root, project.name)
+  const meta = await hydrateMetaFromMaterials(root, loadedMeta)
+  if (JSON.stringify(meta) !== JSON.stringify(loadedMeta)) {
+    saveCaseMeta(root, meta).catch(() => {})
+  }
   const savedStage = await loadCaseStageState(root)
   const [sourceTree, evidenceTree, transcriptTree] = await Promise.all([
     listDirectory(`${root}/raw/sources`).catch(() => [] as FileNode[]),

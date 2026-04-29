@@ -2,12 +2,12 @@
   "dataset_name": "国家法律法规数据库法规包",
   "source": "https://flk.npc.gov.cn",
   "version": "2026-04-29",
-  "generated_at": "2026-04-28T17:09:12Z",
-  "laws_count": 1788,
+  "generated_at": "2026-04-29T05:56:06Z",
+  "laws_count": 1808,
   "latest_effective": "2026-08-15",
   "retry_failures_fixed": null,
-  "retry_failures_remain": 16,
+  "retry_failures_remain": null,
   "compile_incremental": true,
-  "compile_recompiled": 0,
-  "compile_reused": 1788
+  "compile_recompiled": 5,
+  "compile_reused": 1803
 }

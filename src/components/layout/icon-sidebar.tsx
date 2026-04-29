@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react"
 import {
   LayoutDashboard, FolderOpen, Settings, ArrowLeftRight, Globe,
-  Briefcase, Plus, FolderInput, Check, Scale, Wand2, ScrollText, Blocks, ClipboardSignature,
+  Briefcase, Plus, FolderInput, Check, Scale, Wand2, ScrollText, Blocks, MessageSquare,
 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -17,9 +17,9 @@ type NavView = WikiState["activeView"]
 
 const NAV_ITEMS: { view: NavView; icon: typeof LayoutDashboard; label: string }[] = [
   { view: "dashboard", icon: LayoutDashboard, label: "案件总览" },
+  { view: "wiki", icon: MessageSquare, label: "案件问答" },
   { view: "sources", icon: FolderOpen, label: "案件材料" },
   { view: "transcript", icon: ScrollText, label: "证据与庭审" },
-  { view: "worksheet", icon: ClipboardSignature, label: "开庭工作单" },
   { view: "tools", icon: Blocks, label: "辅助工具" },
   { view: "lawbase", icon: Scale, label: "法律依据" },
   { view: "legal-doc", icon: Wand2, label: "法律文书" },

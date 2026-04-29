@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read as IoRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use calamine::{Reader, open_workbook_auto, Data};
@@ -18,6 +18,7 @@ const MEDIA_EXTS: &[&str] = &[
     "mp3", "wav", "ogg", "flac", "aac", "m4a", "wma",
 ];
 const LEGACY_DOC_EXTS: &[&str] = &["doc", "xls", "ppt", "pages", "numbers", "key", "epub"];
+const PRELOADED_LAW_PACK: &str = "lawbase-pack-full/lawbase-pack.json";
 
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String, String> {
@@ -98,6 +99,67 @@ pub fn preprocess_file(path: String) -> Result<String, String> {
     })
 }
 
+#[tauri::command]
+pub fn read_preloaded_law_pack() -> Result<String, String> {
+    run_guarded("read_preloaded_law_pack", || {
+        for path in preloaded_law_pack_candidates() {
+            if path.exists() {
+                return fs::read_to_string(&path)
+                    .map_err(|e| format!("读取预置法规包失败：{} ({})", path.display(), e));
+            }
+        }
+        Err("未找到预置法规包 lawbase-pack-full/lawbase-pack.json".to_string())
+    })
+}
+
+#[tauri::command]
+pub fn ocr_status() -> Result<String, String> {
+    run_guarded("ocr_status", || {
+        let paddle = command_ok("python3", &["-c", "import paddleocr; print('ok')"])
+            || command_ok("python", &["-c", "import paddleocr; print('ok')"]);
+        let tesseract = command_ok("tesseract", &["--version"]);
+        let ocrmypdf = command_ok("ocrmypdf", &["--version"]);
+        Ok(format!(
+            "{{\"paddleocr\":{},\"tesseract\":{},\"ocrmypdf\":{}}}",
+            paddle, tesseract, ocrmypdf
+        ))
+    })
+}
+
+fn command_ok(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn preloaded_law_pack_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        // cwd 可能是项目根目录或 src-tauri/，分别尝试
+        paths.push(cwd.join(PRELOADED_LAW_PACK));
+        paths.push(cwd.join("..").join(PRELOADED_LAW_PACK));
+        paths.push(cwd.join("../..").join(PRELOADED_LAW_PACK));
+    }
+    if let Some(resource_dir) = RESOURCE_DIR_HINT.get() {
+        paths.push(resource_dir.join(PRELOADED_LAW_PACK));
+        paths.push(resource_dir.join("resources").join(PRELOADED_LAW_PACK));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            // 发布包: exe 旁边
+            paths.push(exe_dir.join(PRELOADED_LAW_PACK));
+            paths.push(exe_dir.join("resources").join(PRELOADED_LAW_PACK));
+            paths.push(exe_dir.join("../Resources").join(PRELOADED_LAW_PACK));
+            // 开发模式: exe 在 src-tauri/target/debug/llm-wiki，往上 3-4 层找项目根
+            paths.push(exe_dir.join("../../..").join(PRELOADED_LAW_PACK));
+            paths.push(exe_dir.join("../../../..").join(PRELOADED_LAW_PACK));
+        }
+    }
+    paths
+}
+
 fn cache_path_for(original: &Path) -> std::path::PathBuf {
     let parent = original.parent().unwrap_or(Path::new("."));
     let cache_dir = parent.join(".cache");
@@ -144,15 +206,93 @@ fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+const PADDLE_OCR_PY: &str = r#"
+import sys
+
+path = sys.argv[1]
+
+try:
+    from paddleocr import PaddleOCR
+except Exception as exc:
+    print(f'PaddleOCR import failed: {exc}', file=sys.stderr)
+    sys.exit(2)
+
+def collect_texts(value):
+    texts = []
+    if value is None:
+        return texts
+    if isinstance(value, dict):
+        for key in ('rec_texts', 'texts'):
+            found = value.get(key)
+            if isinstance(found, (list, tuple)):
+                return [str(item).strip() for item in found if str(item).strip()]
+        for key in ('text', 'transcription'):
+            found = value.get(key)
+            if isinstance(found, str) and found.strip():
+                return [found.strip()]
+        for child in value.values():
+            texts.extend(collect_texts(child))
+        return texts
+    if isinstance(value, (list, tuple)):
+        # PaddleOCR 2.x commonly returns [box, (text, score)] items.
+        if len(value) >= 2 and isinstance(value[1], (list, tuple)) and value[1]:
+            maybe_text = value[1][0]
+            if isinstance(maybe_text, str) and maybe_text.strip():
+                texts.append(maybe_text.strip())
+        for child in value:
+            texts.extend(collect_texts(child))
+    return texts
+
+try:
+    try:
+        ocr = PaddleOCR(use_textline_orientation=True, lang='ch')
+    except TypeError:
+        ocr = PaddleOCR(use_angle_cls=True, lang='ch')
+
+    if hasattr(ocr, 'predict'):
+        result = ocr.predict(path)
+    else:
+        result = ocr.ocr(path, cls=True)
+
+    seen = set()
+    ordered = []
+    for text in collect_texts(result):
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+
+    print('\n'.join(ordered))
+except Exception as exc:
+    print(f'PaddleOCR failed: {exc}', file=sys.stderr)
+    sys.exit(3)
+"#;
+
+fn run_paddleocr_text(path: &str) -> Result<String, String> {
+    let mut last_error = None;
+    for python in ["python3", "python"] {
+        match run_command_capture(python, &["-c", PADDLE_OCR_PY, path]) {
+            Ok(text) if !text.trim().is_empty() => return Ok(text),
+            Ok(_) => last_error = Some(format!("{} 已运行，但未识别到文本", python)),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "未检测到可用的 Python/PaddleOCR".to_string()))
+}
+
 fn extract_image_ocr_text(path: &str) -> Result<String, String> {
     let p = Path::new(path);
     if let Some(cached) = read_cache(p) {
         return Ok(cached);
     }
 
-    // Prefer Tesseract CLI because it is widely available offline.
-    // Courts can install PaddleOCR/RapidOCR later; this command layer
-    // keeps the app itself fully offline and avoids cloud OCR.
+    // PaddleOCR is preferred for Chinese court materials. It stays fully
+    // offline when the Python package and model files are installed locally.
+    if let Ok(text) = run_paddleocr_text(path) {
+        write_cache(p, &text)?;
+        return Ok(text);
+    }
+
+    // Fallback to Tesseract so existing offline deployments keep working.
     match run_command_capture("tesseract", &[path, "stdout", "-l", "chi_sim+eng"]) {
         Ok(text) if !text.trim().is_empty() => {
             write_cache(p, &text)?;
@@ -161,7 +301,7 @@ fn extract_image_ocr_text(path: &str) -> Result<String, String> {
         Ok(_) | Err(_) => {
             let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let msg = format!(
-                "（未能提取 OCR 文本。请在本机/内网 OCR 服务器安装 tesseract 并配置中文语言包 chi_sim；原图仍可作为证据核对。文件：{}，大小：{:.1} KB）",
+                "（未能提取 OCR 文本。请优先安装 PaddleOCR；或安装 tesseract 并配置中文语言包 chi_sim。原图仍可作为证据核对。文件：{}，大小：{:.1} KB）",
                 p.file_name().unwrap_or_default().to_string_lossy(),
                 size as f64 / 1024.0
             );
@@ -184,6 +324,12 @@ fn extract_pdf_ocr_text(path: &str) -> Result<String, String> {
     if let Some(parent) = cache_path.parent() {
         fs::create_dir_all(parent).ok();
     }
+
+    if let Ok(text) = run_paddleocr_text(path) {
+        write_cache(p, &text)?;
+        return Ok(text);
+    }
+
     let sidecar = cache_path.to_string_lossy().to_string();
     let result = Command::new("ocrmypdf")
         .args([
@@ -207,7 +353,7 @@ fn extract_pdf_ocr_text(path: &str) -> Result<String, String> {
             }
         }
         _ => {
-            let msg = "（该 PDF 未提取到可读文本，且未检测到可用的本地 ocrmypdf OCR 工具。请安装 ocrmypdf 或导入可复制文字的 PDF/Word 原件。）".to_string();
+            let msg = "（该 PDF 未提取到可读文本，且未检测到可用的本地 PaddleOCR/ocrmypdf OCR 工具。请安装 PaddleOCR，或导入可复制文字的 PDF/Word 原件。）".to_string();
             write_cache(p, &msg).ok();
             Ok(msg)
         }

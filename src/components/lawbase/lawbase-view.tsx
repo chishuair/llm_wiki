@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import {
   BookMarked, Search, Copy, ClipboardCheck, Scale, Trash2, FileText, Loader2,
-  ChevronRight, ChevronDown, ListTree,
+  ChevronRight, ChevronDown, ListTree, Building2,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -11,6 +11,7 @@ import {
   importLawCode,
   importLawPack,
   getPackManifest,
+  getInstalledPacks,
   listCodes,
   removeLawCode,
   searchLaws,
@@ -19,7 +20,7 @@ import {
 import { parsePdfIntoLawDraft, type ParsedLawPreview } from "@/lib/lawbase/parse-pdf"
 import { useWikiStore } from "@/stores/wiki-store"
 import { LawbasePreviewDialog } from "@/components/lawbase/lawbase-preview-dialog"
-import type { LawArticle, LawCode, LawSearchHit } from "@/types/lawbase"
+import type { InstalledLawPack, LawArticle, LawCode, LawSearchHit } from "@/types/lawbase"
 import type { LawbasePack } from "@/types/lawbase"
 
 function ArticleCard({ code, article }: { code: LawCode; article: LawArticle }) {
@@ -86,6 +87,61 @@ function ArticleCard({ code, article }: { code: LawCode; article: LawArticle }) 
   )
 }
 
+function classifyLawCode(code: LawCode): string {
+  if (code.hierarchyLevel) return code.hierarchyLevel
+  const name = code.code
+  const text = `${code.code} ${code.source ?? ""} ${code.version ?? ""} ${code.issuer ?? ""} ${code.officialCategory ?? ""}`
+  const localPattern =
+    /(北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|内蒙古|广西|西藏|宁夏|新疆|香港|澳门|自治州|自治县|自治旗|地区|盟|市)/
+
+  if (
+    text.includes("最高人民法院")
+    || text.includes("最高人民检察院")
+    || text.includes("司法解释")
+    || name.includes("关于审理")
+    || name.includes("适用法律")
+  ) {
+    return "司法解释与两高规范性文件"
+  }
+
+  if (/^中华人民共和国.+法$/.test(name) || /^中华人民共和国.+法实施/.test(name)) {
+    return "法律"
+  }
+
+  if (text.includes("国务院") || (name.endsWith("条例") && !localPattern.test(text.slice(0, 160)))) {
+    return "行政法规"
+  }
+
+  if (localPattern.test(text.slice(0, 180))) {
+    return "地方性法规、自治条例和单行条例"
+  }
+
+  if (/(决定|规定|办法|规则|条例)$/.test(name)) {
+    return "其他规范性文件"
+  }
+
+  return "其他"
+}
+
+function lawMetaText(code: LawCode): string {
+  const parts = [
+    code.officialCategory,
+    code.issuer,
+    code.promulgationDate ? `公布：${code.promulgationDate}` : "",
+    (code.sourceEffectiveDate || code.effective) ? `施行：${code.sourceEffectiveDate || code.effective}` : "",
+    code.sourceId ? `来源ID：${code.sourceId}` : "",
+  ].filter(Boolean)
+  return parts.join(" · ")
+}
+
+function packTierLabel(packInfo: ReturnType<typeof getPackManifest>): string {
+  if (!packInfo?.pack_tier) return "未标注"
+  if (packInfo.pack_tier === "core") return "核心法包"
+  if (packInfo.pack_tier === "topic") return "专题包"
+  if (packInfo.pack_tier === "full") return "全量包"
+  return packInfo.pack_tier
+}
+
 export function LawbaseView() {
   const llmConfig = useWikiStore((s) => s.llmConfig)
   const [query, setQuery] = useState("")
@@ -98,12 +154,15 @@ export function LawbaseView() {
   const [parsing, setParsing] = useState<null | { path: string }>(null)
   const [preview, setPreview] = useState<ParsedLawPreview | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [packInfo, setPackInfo] = useState(() => getPackManifest())
+  const [installedPacks, setInstalledPacks] = useState<InstalledLawPack[]>(() => getInstalledPacks())
 
   useEffect(() => {
     const unsubscribe = subscribe(() => {
       setCodes(listCodes())
       setPackInfo(getPackManifest())
+      setInstalledPacks(getInstalledPacks())
     })
     return unsubscribe
   }, [])
@@ -136,10 +195,44 @@ export function LawbaseView() {
 
   function expandAll() {
     setExpanded(new Set(codes.map((c) => c.code)))
+    setExpandedGroups(new Set(groupedCodes.map((g) => g.group)))
   }
   function collapseAll() {
     setExpanded(new Set())
+    setExpandedGroups(new Set())
   }
+
+  // 按效力层级/法规性质分组。法规包中的 issuer 目前有大量空值，
+  // 因此这里优先依据法规名称、来源文件名和版本说明判断。
+  const groupedCodes = useMemo(() => {
+    const ORDER = [
+      "法律",
+      "行政法规",
+      "司法解释与两高规范性文件",
+      "地方性法规、自治条例和单行条例",
+      "其他规范性文件",
+      "其他",
+    ]
+    const map = new Map<string, LawCode[]>()
+    for (const code of codes) {
+      const group = classifyLawCode(code)
+      const list = map.get(group) ?? []
+      list.push(code)
+      map.set(group, list)
+    }
+    // 按预设顺序排列，其余按字母排
+    const result: { group: string; items: LawCode[] }[] = []
+    for (const g of ORDER) {
+      if (map.has(g)) {
+        result.push({ group: g, items: map.get(g)! })
+        map.delete(g)
+      }
+    }
+    for (const [g, items] of map) {
+      result.push({ group: g, items })
+    }
+    return result
+  }, [codes])
 
   const hits = useMemo<LawSearchHit[]>(() => {
     if (!query.trim()) return []
@@ -237,9 +330,37 @@ export function LawbaseView() {
         </p>
         {packInfo && (
           <div className="mt-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary">
-            预置/离线法规包：{packInfo.dataset_name}；来源：{packInfo.source}；版本：{packInfo.version}；
+            预置/离线法规包：{packInfo.dataset_name}；层级：{packTierLabel(packInfo)}
+            {packInfo.topic ? `；专题：${packInfo.topic}` : ""}
+            {packInfo.pack_profile ? `；配置：${packInfo.pack_profile}` : ""}
+            ；来源：{packInfo.source}；版本：{packInfo.version}；
             生成时间：{packInfo.generated_at}；法规数量：{packInfo.laws_count ?? codes.length} 部
             {packInfo.latest_effective ? `；最新生效/修订时间：${packInfo.latest_effective}` : ""}
+          </div>
+        )}
+        {packInfo?.pack_tier !== "full" && (
+          <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
+            当前安装的是{packTierLabel(packInfo)}。如需覆盖更多案由或地方性法规，建议继续导入专题包或全量法规包。
+          </div>
+        )}
+        {installedPacks.length > 0 && (
+          <div className="mt-3 rounded-md border bg-background/40 px-3 py-3 text-xs">
+            <div className="mb-2 font-medium text-foreground">已安装法规包</div>
+            <div className="space-y-2">
+              {installedPacks.map((pack) => (
+                <div key={`${pack.dataset_name}-${pack.version}-${pack.pack_profile ?? ""}`} className="rounded-md border px-3 py-2">
+                  <div className="font-medium text-foreground">
+                    {pack.dataset_name} · {packTierLabel(pack)}
+                  </div>
+                  <div className="mt-1 text-muted-foreground">
+                    {pack.topic ? `专题：${pack.topic} · ` : ""}
+                    {pack.pack_profile ? `配置：${pack.pack_profile} · ` : ""}
+                    版本：{pack.version} · 法规数量：{pack.laws_count ?? "未知"} ·
+                    安装时间：{pack.installed_at}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
         {message && (
@@ -315,7 +436,7 @@ export function LawbaseView() {
               {codes.length > 1 && (
                 <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                   <ListTree className="h-3.5 w-3.5" />
-                  <span>按法律折叠显示</span>
+                  <span>按效力层级分类</span>
                   <button
                     onClick={expandAll}
                     className="ml-2 rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground"
@@ -330,51 +451,84 @@ export function LawbaseView() {
                   </button>
                 </div>
               )}
-              <div className="space-y-3">
-                {codes.map((code) => {
-                  const isOpen = expanded.has(code.code)
+              <div className="space-y-2">
+                {groupedCodes.map(({ group, items }) => {
+                  const groupOpen = expandedGroups.has(group)
                   return (
-                    <div key={code.code} className="rounded-lg border bg-card/40">
-                      <div className="flex items-center gap-2 px-3 py-2 text-[13px] font-semibold text-foreground transition-colors hover:bg-accent/30">
-                        <button
-                          type="button"
-                          onClick={() => toggleCode(code.code)}
-                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                        >
-                          {isOpen ? (
-                            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          ) : (
-                            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          )}
-                          <Scale className="h-3.5 w-3.5 shrink-0 text-primary" />
-                          <span className="truncate">{code.code}</span>
-                          <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                            {code.articles.length} 条
-                          </span>
-                          <span className="truncate text-[11px] font-normal text-muted-foreground">
-                            {code.version ? `· ${code.version}` : ""}
-                            {code.effective ? ` · ${code.effective} 起施行` : ""}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRemove(code.code)}
-                          className="flex shrink-0 items-center gap-1 rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                          title="删除这部法律"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                          删除
-                        </button>
-                      </div>
-                      {isOpen && (
-                        <div className="space-y-2 border-t p-3">
-                          {code.articles.map((article) => (
-                            <ArticleCard
-                              key={`${code.code}-${article.number}`}
-                              code={code}
-                              article={article}
-                            />
-                          ))}
+                    <div key={group} className="rounded-lg border bg-card/30">
+                      {/* 分组标题 */}
+                      <button
+                        type="button"
+                        onClick={() => setExpandedGroups((prev) => {
+                          const next = new Set(prev)
+                          if (next.has(group)) next.delete(group)
+                          else next.add(group)
+                          return next
+                        })}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-bold text-foreground hover:bg-accent/30 rounded-lg"
+                      >
+                        {groupOpen ? (
+                          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        )}
+                        <Building2 className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                        <span className="flex-1">{group}</span>
+                        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-500">
+                          {items.length} 部
+                        </span>
+                      </button>
+                      {/* 分组内法律列表 */}
+                      {groupOpen && (
+                        <div className="space-y-1.5 border-t p-2">
+                          {items.map((code) => {
+                            const isOpen = expanded.has(code.code)
+                            return (
+                              <div key={code.code} className="rounded-md border bg-card/50">
+                                <div className="flex items-center gap-2 px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-accent/20">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleCode(code.code)}
+                                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                                  >
+                                    {isOpen ? (
+                                      <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                    ) : (
+                                      <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                    )}
+                                    <Scale className="h-3 w-3 shrink-0 text-primary" />
+                                    <span className="truncate">{code.code}</span>
+                                    <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                                      {code.articles.length} 条
+                                    </span>
+                                    <span className="min-w-0 truncate text-[10px] font-normal text-muted-foreground">
+                                      {lawMetaText(code)}
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemove(code.code)}
+                                    className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                    title="删除这部法律"
+                                  >
+                                    <Trash2 className="h-2.5 w-2.5" />
+                                    删除
+                                  </button>
+                                </div>
+                                {isOpen && (
+                                  <div className="space-y-2 border-t p-3">
+                                    {code.articles.map((article) => (
+                                      <ArticleCard
+                                        key={`${code.code}-${article.number}`}
+                                        code={code}
+                                        article={article}
+                                      />
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
                         </div>
                       )}
                     </div>

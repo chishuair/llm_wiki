@@ -108,6 +108,9 @@ export interface GeneratedSection {
   heading: string
   content: string
   source: LegalDocSectionKind
+  citedLawLines?: string[]
+  contextSummary?: string
+  suggestedMissingLawNames?: string[]
 }
 
 export interface GeneratedDocument {

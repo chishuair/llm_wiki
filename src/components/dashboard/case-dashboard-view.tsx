@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
-import { AlertTriangle, ArrowRight, FileText, Files, Gavel, Scale, ScrollText } from "lucide-react"
+import { AlertTriangle, ArrowRight, FileText, Files, Gavel, RefreshCw, Scale, ScrollText } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { CASE_STAGE_OPTIONS, saveCaseStageState, type CaseStageId } from "@/lib/case-stage/state"
+import { saveCaseStageState, type CaseStageId } from "@/lib/case-stage/state"
 import { loadCaseMeta, saveCaseMeta, type CaseMeta, type CaseMetaConfirmState, type CaseMetaField } from "@/lib/case-meta"
 import { extractCaseMetaSuggestion } from "@/lib/case-meta-extract"
 import { Input } from "@/components/ui/input"
@@ -26,6 +26,7 @@ export function CaseDashboardView() {
   const [sourceNote, setSourceNote] = useState("")
   const [candidateMap, setCandidateMap] = useState<CaseMetaSuggestion["candidates"]>({})
   const [conflictFields, setConflictFields] = useState<string[]>([])
+  const [autoExtractedKey, setAutoExtractedKey] = useState("")
 
   useEffect(() => {
     if (!project) return
@@ -56,30 +57,26 @@ export function CaseDashboardView() {
 
   useEffect(() => {
     if (!project || !summary || !metaDraft) return
-    const needAutoFill = summary.materialCount > 0 && !metaDraft.caseNumber && !metaDraft.cause && !metaDraft.courtName
+    const key = `${project.path}:${dataVersion}:${summary.materialCount}`
+    if (autoExtractedKey === key) return
+    const needAutoFill = summary.materialCount > 0 && shouldAutoExtractMeta(metaDraft)
     if (!needAutoFill || extractingMeta) return
     let cancelled = false
+    setAutoExtractedKey(key)
     setExtractingMeta(true)
     extractCaseMetaSuggestion(project.path, llmConfig, summary.caseName)
       .then((suggestion) => {
         if (cancelled) return
-        setMetaDraft((prev) => {
-          if (!prev) return prev
-          return {
-            ...prev,
-            caseName: prev.caseName || suggestion.values.caseName || prev.caseName,
-            caseNumber: prev.caseNumber || suggestion.values.caseNumber || "",
-            cause: prev.cause || suggestion.values.cause || "",
-            caseType: prev.caseType || suggestion.values.caseType || prev.caseType,
-            subtype: prev.subtype || suggestion.values.subtype || "",
-            courtName: prev.courtName || suggestion.values.courtName || "",
-            presidingJudge: prev.presidingJudge || suggestion.values.presidingJudge || "",
-            clerk: prev.clerk || suggestion.values.clerk || "",
-            procedureStage: prev.procedureStage || suggestion.values.procedureStage || "",
-            nextHearingAt: prev.nextHearingAt || suggestion.values.nextHearingAt || "",
-        confirmStates: buildConfirmStates(prev.confirmStates, suggestion.conflicts || [], suggestion.values),
-          }
-        })
+        const base = useWikiStore.getState().project?.path === project.path ? metaDraft : null
+        const mergedForSave = base
+          ? mergeMetaSuggestion(base, suggestion.values, suggestion.conflicts || [])
+          : null
+        if (mergedForSave) {
+          setMetaDraft(mergedForSave)
+          saveCaseMeta(project.path, mergedForSave)
+            .then(() => collectDashboardSummary(project).then(setSummary).catch(() => {}))
+            .catch(() => {})
+        }
         setSourceHints(suggestion.sourceHints as Record<string, string>)
         setCandidateMap(suggestion.candidates || {})
         setConflictFields(suggestion.conflicts || [])
@@ -91,7 +88,7 @@ export function CaseDashboardView() {
     return () => {
       cancelled = true
     }
-  }, [project, summary, metaDraft, llmConfig, extractingMeta])
+  }, [project, summary, metaDraft, llmConfig, extractingMeta, dataVersion, autoExtractedKey])
 
   if (!project) {
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">请先打开案件知识库</div>
@@ -127,25 +124,42 @@ export function CaseDashboardView() {
     }
   }
 
+  async function handleRefreshSummary() {
+    if (!project) return
+    setLoading(true)
+    try {
+      const next = await collectDashboardSummary(project)
+      setSummary(next)
+      setMetaDraft(next.meta)
+      setAutoExtractedKey("")
+      useWikiStore.getState().bumpDataVersion()
+    } finally {
+      setLoading(false)
+    }
+  }
+
   async function handleAutoExtract() {
     if (!project || !summary) return
+    setAutoExtractedKey("")
+    setSourceNote("正在从原始材料和已生成知识页识别案件主数据...")
     setExtractingMeta(true)
     try {
       const suggestion = await extractCaseMetaSuggestion(project.path, llmConfig, summary.caseName)
-      setMetaDraft((prev) => {
-        if (!prev) return prev
-        return {
-          ...prev,
-          ...Object.fromEntries(
-            Object.entries(suggestion.values).filter(([, value]) => typeof value === "string" ? value.trim() : value)
-          ),
-          confirmStates: buildConfirmStates(prev.confirmStates, suggestion.conflicts || [], suggestion.values),
-        } as CaseMeta
-      })
+      const mergedForSave = metaDraft
+        ? mergeMetaSuggestion(metaDraft, suggestion.values, suggestion.conflicts || [], { forceUnconfirmed: true })
+        : null
+      if (mergedForSave) {
+        setMetaDraft(mergedForSave)
+        await saveCaseMeta(project.path, mergedForSave)
+        const next = await collectDashboardSummary(project)
+        setSummary(next)
+      }
       setSourceHints(suggestion.sourceHints as Record<string, string>)
       setCandidateMap(suggestion.candidates || {})
       setConflictFields(suggestion.conflicts || [])
-      setSourceNote(suggestion.note || "")
+      setSourceNote(suggestion.note || "识别完成，请人工确认后保存。")
+    } catch (err) {
+      setSourceNote(`识别失败：${(err as Error).message}`)
     } finally {
       setExtractingMeta(false)
     }
@@ -170,6 +184,10 @@ export function CaseDashboardView() {
                   {action.label}
                 </Button>
               ))}
+              <Button variant="outline" onClick={handleRefreshSummary} disabled={loading}>
+                <RefreshCw className="mr-1.5 h-4 w-4" />
+                刷新总览
+              </Button>
               <Button variant="outline" onClick={handleAutoExtract} disabled={extractingMeta}>
                 {extractingMeta ? "识别中..." : "从材料自动识别"}
               </Button>
@@ -340,23 +358,6 @@ export function CaseDashboardView() {
               </div>
             </div>
           )}
-          <div className="mt-4 flex flex-wrap gap-2">
-            {CASE_STAGE_OPTIONS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                disabled={savingStage}
-                onClick={() => handleStageChange(item.id)}
-                className={`rounded-md border px-3 py-1.5 text-xs ${
-                  summary.currentStageId === item.id
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "border-border bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
         </header>
 
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -429,97 +430,6 @@ export function CaseDashboardView() {
           </div>
         </section>
 
-        <section className="rounded-xl border bg-card/40 p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-sm font-semibold">当前待办</div>
-            <div className="text-xs text-muted-foreground">按优先级排序</div>
-          </div>
-          {summary.todos.length > 0 ? (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {summary.todos.map((todo) => (
-                <button
-                  key={todo.id}
-                  type="button"
-                  onClick={() => setActiveView(todo.targetView)}
-                  className={`rounded-lg border px-4 py-3 text-left hover:border-primary/50 hover:bg-primary/5 ${
-                    todo.priority === "high"
-                      ? "border-amber-500/30 bg-amber-500/5"
-                      : todo.priority === "medium"
-                        ? "border-sky-500/20 bg-sky-500/5"
-                        : "border-border bg-background/70"
-                  }`}
-                >
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <span className="font-medium">{todo.label}</span>
-                    <span className={`rounded-full px-2 py-0.5 text-[10px] ${
-                      todo.priority === "high"
-                        ? "bg-amber-500/15 text-amber-600"
-                        : todo.priority === "medium"
-                          ? "bg-sky-500/15 text-sky-600"
-                          : "bg-muted text-muted-foreground"
-                    }`}>
-                      {todo.priority === "high" ? "高优先级" : todo.priority === "medium" ? "处理中" : "提示"}
-                    </span>
-                  </div>
-                  <div className="text-xs leading-relaxed text-muted-foreground">{todo.detail}</div>
-                  <div className="mt-3 inline-flex items-center gap-1 text-xs text-primary">
-                    立即处理
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </div>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="text-sm text-muted-foreground">当前没有待办项，案件可以继续向下推进。</div>
-          )}
-        </section>
-
-        <section className="rounded-xl border bg-card/40 p-5">
-          <div className="mb-3 text-sm font-semibold">下一步动作</div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {summary.actions.map((action) => (
-              <button
-                key={action.id}
-                type="button"
-                onClick={() => setActiveView(action.targetView)}
-                className="flex items-center justify-between rounded-lg border bg-background/70 px-4 py-3 text-left hover:border-primary/50 hover:bg-primary/5"
-              >
-                <div>
-                  <div className="font-medium">{action.label}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">{action.hint}</div>
-                </div>
-                <ArrowRight className="h-4 w-4 text-muted-foreground" />
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="grid gap-4 xl:grid-cols-2">
-          <div className="rounded-xl border bg-card/40 p-5">
-            <div className="mb-3 text-sm font-semibold">最近庭审整理</div>
-            {summary.latestTranscriptTitle ? (
-              <div className="space-y-2 text-sm">
-                <div className="font-medium">{summary.latestTranscriptTitle}</div>
-                <div className="text-muted-foreground">{summary.latestTranscriptSummary || "已生成整理结果，可继续校改。"}</div>
-                <Button variant="outline" size="sm" onClick={() => setActiveView("transcript")}>
-                  打开证据与庭审
-                </Button>
-              </div>
-            ) : (
-              <div className="text-sm text-muted-foreground">尚未生成庭审笔录整理结果。</div>
-            )}
-          </div>
-
-          <div className="rounded-xl border bg-card/40 p-5">
-            <div className="mb-3 text-sm font-semibold">文书起草准备度</div>
-            <ul className="space-y-2 text-sm">
-              <li>材料导入：{summary.materialCount > 0 ? "已具备" : "未完成"}</li>
-              <li>证据与庭审：{summary.transcriptCount > 0 ? "已有整理结果" : "建议先整理"}</li>
-              <li>开庭工作单：{summary.hasWorksheet ? "已具备" : "建议先生成"}</li>
-              <li>法律依据：{summary.lawCount > 0 ? "可引用本地法条" : "建议先导入"}</li>
-            </ul>
-          </div>
-        </section>
       </div>
     </div>
   )
@@ -624,6 +534,58 @@ function buildConfirmStates(
     if (!value) continue
     next[field] = conflicts.includes(field) ? "conflict" : previous[field] === "confirmed" ? "confirmed" : "pending"
   }
+  return next
+}
+
+function isPlaceholderValue(field: CaseMetaField, value: string | undefined): boolean {
+  const text = (value || "").trim()
+  if (!text) return true
+  if (/X{2,}|某|待填|待确认|示例/.test(text)) return true
+  if (field === "caseNumber" && /（2026）.*民初.*号/.test(text) && /X|某|英法/.test(text)) return true
+  return false
+}
+
+function shouldAutoExtractMeta(meta: CaseMeta): boolean {
+  const fields: CaseMetaField[] = ["caseNumber", "cause", "courtName", "caseType", "subtype", "presidingJudge", "clerk", "procedureStage"]
+  return fields.some((field) => {
+    const state = meta.confirmStates[field]
+    if (state === "confirmed") return false
+    return isPlaceholderValue(field, String(meta[field] ?? ""))
+  })
+}
+
+function mergeMetaSuggestion(
+  prev: CaseMeta,
+  values: Partial<CaseMeta>,
+  conflicts: string[],
+  options: { forceUnconfirmed?: boolean } = {}
+): CaseMeta {
+  const next: CaseMeta = { ...prev }
+  const fields: CaseMetaField[] = [
+    "caseName",
+    "caseNumber",
+    "cause",
+    "caseType",
+    "subtype",
+    "courtName",
+    "presidingJudge",
+    "clerk",
+    "procedureStage",
+    "nextHearingAt",
+  ]
+  for (const field of fields) {
+    const incoming = values[field]
+    if (typeof incoming !== "string" || !incoming.trim()) continue
+    const state = prev.confirmStates[field]
+    const current = String(prev[field] ?? "")
+    const mayReplace = options.forceUnconfirmed
+      ? state !== "confirmed"
+      : state !== "confirmed" && isPlaceholderValue(field, current)
+    if (mayReplace) {
+      ;(next as unknown as Record<string, string>)[field] = incoming.trim()
+    }
+  }
+  next.confirmStates = buildConfirmStates(prev.confirmStates, conflicts, values)
   return next
 }
 

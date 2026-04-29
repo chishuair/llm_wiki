@@ -22,6 +22,7 @@ import { collectCaseContext } from "@/lib/legal-doc/collect-case"
 import { generateLegalDocument } from "@/lib/legal-doc/generate"
 import { exportToDocx } from "@/lib/legal-doc/export"
 import { summarizeSource } from "@/lib/legal-doc/source-summary"
+import { listCodes as listLawCodes, subscribe as subscribeLawbase } from "@/lib/lawbase"
 import { TemplateEditor } from "@/components/legal-doc/template-editor"
 import type {
   CaseContext,
@@ -57,9 +58,16 @@ export function LegalDocView() {
   const [editing, setEditing] = useState<null | { draft: LegalDocTemplate; fork: boolean }>(null)
   const [caseStageText, setCaseStageText] = useState("未设置")
   const [metaRiskText, setMetaRiskText] = useState("")
+  const [lawCount, setLawCount] = useState(() => listLawCodes().length)
 
   useEffect(() => {
     const unsub = subscribeTemplates(() => setTemplates(listTemplates()))
+    return unsub
+  }, [])
+
+  useEffect(() => {
+    const unsub = subscribeLawbase(() => setLawCount(listLawCodes().length))
+    setLawCount(listLawCodes().length)
     return unsub
   }, [])
 
@@ -494,7 +502,7 @@ export function LegalDocView() {
             </div>
           </div>
 
-          <CaseDataHint ctx={ctx} caseStageText={caseStageText} metaRiskText={metaRiskText} />
+          <CaseDataHint ctx={ctx} caseStageText={caseStageText} metaRiskText={metaRiskText} lawCount={lawCount} />
 
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={handleReset}>
@@ -592,7 +600,17 @@ export function LegalDocView() {
   )
 }
 
-function CaseDataHint({ ctx, caseStageText, metaRiskText }: { ctx: CaseContext; caseStageText: string; metaRiskText: string }) {
+function CaseDataHint({
+  ctx,
+  caseStageText,
+  metaRiskText,
+  lawCount,
+}: {
+  ctx: CaseContext
+  caseStageText: string
+  metaRiskText: string
+  lawCount: number
+}) {
   const entries: Array<[string, string]> = [
     ["案情概述", ctx.case_overview],
     ["当事人信息", ctx.parties],
@@ -653,6 +671,26 @@ function CaseDataHint({ ctx, caseStageText, metaRiskText }: { ctx: CaseContext; 
         className="rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-500"
       >
         已接入开庭工作单，文书生成时会按章节映射规则优先参考其中的庭审提纲、关键要素状态、发问建议、补证建议和工作清单。
+      </div>
+    )
+  }
+
+  if (lawCount > 0) {
+    lines.push(
+      <div
+        key="lawbase"
+        className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600"
+      >
+        本地法规库已接入 <b>{lawCount}</b> 部法律法规。文书中的法条引用将以本地法规库为准；库中未收录的法律，应先导入后再生成正式草稿。
+      </div>
+    )
+  } else {
+    lines.push(
+      <div
+        key="lawbase-empty"
+        className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+      >
+        本地法规库为空。为避免 AI 编造法条，请先进入「法律依据」导入相关法律法规后再生成正式文书。
       </div>
     )
   }
@@ -763,6 +801,21 @@ function PreviewSection({
           </span>
         )}
       </div>
+      {section.contextSummary && (
+        <div className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-[11px] text-sky-700">
+          {section.contextSummary}
+        </div>
+      )}
+      {section.citedLawLines && section.citedLawLines.length > 0 && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-700">
+          本节已校验法条：{section.citedLawLines.join("、")}
+        </div>
+      )}
+      {section.suggestedMissingLawNames && section.suggestedMissingLawNames.length > 0 && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700">
+          建议补充导入：{section.suggestedMissingLawNames.join("、")}
+        </div>
+      )}
       <textarea
         value={section.content}
         onChange={(e) => onChange(e.target.value)}

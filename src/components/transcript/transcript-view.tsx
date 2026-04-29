@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { FilePlus2, Loader2, RefreshCw, ScrollText, Sparkles, Layers3 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { copyFile, createDirectory, listDirectory, preprocessFile, readFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
 import { normalizePath, getFileName } from "@/lib/path-utils"
@@ -15,6 +13,7 @@ import { getTranscriptSubtypeOptions, resolveTranscriptRuleSet } from "@/lib/tra
 import { buildTranscriptTitle, loadTranscriptRecord, saveTranscriptRecord } from "@/lib/transcript/storage"
 import { TranscriptEditor } from "./transcript-editor"
 import type { FileNode } from "@/types/wiki"
+import { classifyMaterial } from "@/lib/hearing/material-intelligence"
 import type {
   HearingTranscriptFrontmatter,
   TranscriptCaseType,
@@ -68,8 +67,8 @@ export function TranscriptView() {
 
   const [caseType, setCaseType] = useState<TranscriptCaseType>("民事")
   const [caseSubtypeId, setCaseSubtypeId] = useState<string>("loan-dispute")
-  const [sessionDate, setSessionDate] = useState("")
-  const [sessionIndex, setSessionIndex] = useState<string>("")
+  const sessionDate = ""
+  const sessionIndex = ""
   const [sources, setSources] = useState<FileNode[]>([])
   const [records, setRecords] = useState<TranscriptListItem[]>([])
   const [selectedSourcePaths, setSelectedSourcePaths] = useState<string[]>([])
@@ -259,6 +258,59 @@ export function TranscriptView() {
     }
   }
 
+  async function handleAutoDetectAndProcess() {
+    if (!project || sources.length === 0) return
+    setMessage("")
+    setBusyText("正在识别哪些原始材料属于庭审笔录...")
+    try {
+      const transcriptCandidates: string[] = []
+      for (let i = 0; i < sources.length; i++) {
+        const source = sources[i]
+        setBusyText(`正在识别材料 ${i + 1}/${sources.length}：${source.name}`)
+        const result = await classifyMaterial(source.path, llmConfig)
+        if (result.kind === "transcript") transcriptCandidates.push(source.path)
+      }
+      setSelectedSourcePaths(transcriptCandidates)
+      if (transcriptCandidates.length === 0) {
+        setMessage("未识别到可自动整理的笔录类材料。")
+        return
+      }
+      setBusyText(`已识别到 ${transcriptCandidates.length} 份笔录材料，正在自动整理...`)
+      for (let index = 0; index < transcriptCandidates.length; index++) {
+        const sourcePath = transcriptCandidates[index]
+        setBusyText(`正在整理第 ${index + 1} / ${transcriptCandidates.length} 份笔录：${getFileName(sourcePath)}`)
+        const analyzed = await analyzeTranscriptSource({
+          sourcePath,
+          caseType,
+          caseSubtypeId: caseSubtypeId || undefined,
+          llmConfig,
+          onProgress: (current, total) => {
+            setBusyText(`正在整理 ${getFileName(sourcePath)}：片段 ${current}/${total}`)
+          },
+        })
+        const title = buildTranscriptTitle(sourcePath)
+        await saveTranscriptRecord({
+          projectPath: project.path,
+          title,
+          caseType,
+          caseSubtypeId: caseSubtypeId || undefined,
+          caseSubtypeLabel: ruleSet.subtype?.label,
+          sessionDate: sessionDate || undefined,
+          sourcePath: sourcePath.replace(`${projectPath}/`, ""),
+          data: analyzed,
+        })
+      }
+      await refreshWorkspace()
+      bumpDataVersion()
+      setMessage(`已自动识别并整理 ${transcriptCandidates.length} 份笔录材料。`)
+      await saveCaseStageState(project.path, "pending_worksheet").catch(() => {})
+    } catch (error) {
+      setMessage(`自动识别笔录失败：${String(error)}`)
+    } finally {
+      setBusyText("")
+    }
+  }
+
   async function handleMergeSelectedRecords() {
     if (!project || selectedRecordPaths.length < 2) return
     try {
@@ -300,7 +352,7 @@ export function TranscriptView() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto">
       <div className="border-b px-6 py-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -314,6 +366,10 @@ export function TranscriptView() {
               <FilePlus2 className="mr-1.5 h-4 w-4" />
               导入笔录原文
             </Button>
+            <Button variant="outline" onClick={handleAutoDetectAndProcess} disabled={Boolean(busyText)}>
+              <Sparkles className="mr-1.5 h-4 w-4" />
+              自动识别并整理
+            </Button>
             <Button variant="outline" onClick={() => refreshWorkspace()}>
               <RefreshCw className="mr-1.5 h-4 w-4" />
               刷新
@@ -322,113 +378,7 @@ export function TranscriptView() {
         </div>
       </div>
 
-      <div className="grid shrink-0 gap-4 border-b px-6 py-4 md:grid-cols-3 xl:grid-cols-5">
-        <div className="space-y-2">
-          <Label>案件类型</Label>
-          <select
-            value={caseType}
-            onChange={(e) => {
-              const nextCaseType = e.target.value as TranscriptCaseType
-              const nextSubtype = getTranscriptSubtypeOptions(nextCaseType)[0]
-              setCaseType(nextCaseType)
-              setCaseSubtypeId(nextSubtype?.id || "")
-            }}
-            className="flex h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <option value="刑事">刑事</option>
-            <option value="民事">民事</option>
-            <option value="行政">行政</option>
-          </select>
-        </div>
-        <div className="space-y-2">
-          <Label>案件子类型</Label>
-          <select
-            value={caseSubtypeId}
-            onChange={(e) => setCaseSubtypeId(e.target.value)}
-            className="flex h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <option value="">未指定</option>
-            {subtypeOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="space-y-2">
-          <Label>庭审日期</Label>
-          <Input type="date" value={sessionDate} onChange={(e) => setSessionDate(e.target.value)} />
-        </div>
-        <div className="space-y-2">
-          <Label>起始庭次</Label>
-          <Input
-            type="number"
-            min={1}
-            value={sessionIndex}
-            onChange={(e) => setSessionIndex(e.target.value)}
-            placeholder="如 1"
-          />
-        </div>
-        <div className="space-y-2 xl:col-span-2">
-          <Label>内网模型提示</Label>
-          <div className="rounded-md border bg-card/30 px-3 py-2 text-xs text-muted-foreground">
-            当前会调用设置页中的内网模型服务。若使用共享 Ollama/OpenAI 兼容接口，请在模型设置中填写内网地址；
-            自定义接口应带上 <code>/v1</code> 前缀。
-          </div>
-        </div>
-      </div>
-
-      <div className="grid shrink-0 gap-4 border-b bg-muted/20 px-6 py-4 xl:grid-cols-4">
-        <RuleCard
-          title={`审理重点（${ruleSet.caseType} · ${ruleSet.version}）`}
-          summary={ruleSet.summary}
-          items={ruleSet.extractionFocus}
-        />
-        <RuleCard
-          title={`子类型规则${ruleSet.subtype ? `：${ruleSet.subtype.label}` : ""}`}
-          summary={
-            ruleSet.subtype?.summary ||
-            (caseType === "民事"
-              ? "当前未指定民事子类型，使用民事通用规则。"
-              : "当前案件类型暂未接入最高法公开要素式子类型规则，仅保留通用笔录整理。")
-          }
-          items={
-            ruleSet.subtype?.promptRules ||
-            (caseType === "民事"
-              ? ["可继续选择更具体的民事子类型，以提高整理针对性。"]
-              : ["刑事、行政目前仅保留通用笔录整理，不显示最高法要素清单。"])
-          }
-        />
-        <RuleCard
-          title="要素清单"
-          summary="整理结果会尽量按下列要素输出，便于后续做要素式审判或文书生成。"
-          items={
-            ruleSet.subtype?.elementDefs?.map((item) => `${item.label}：${item.description}`) ||
-            [caseType === "民事" ? "当前民事子类型尚未定义最高法要素清单。" : "当前案件类型暂无最高法公开统一要素清单。"]
-          }
-        />
-        <RuleCard
-          title="规则来源"
-          summary="用于说明当前子类型要素清单是否来源于最高法公开示范文本。"
-          items={
-            ruleSet.subtype?.sourceBasis
-              ? [ruleSet.subtype.sourceBasis]
-              : [caseType === "民事" ? "当前民事通用规则未绑定具体示范文本条目。" : "刑事、行政当前未绑定最高法统一要素式审判规则。"]
-          }
-        />
-        <RuleCard
-          title="输出焦点"
-          summary="整理结果会优先围绕以下方向生成争议焦点、质证意见与辩论要点。"
-          items={ruleSet.outputFocus}
-        />
-        <RuleCard
-          title="人工核对清单"
-          summary="模型整理完成后，法官或书记员建议重点核对以下事项。"
-          items={ruleSet.checklist}
-        />
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className="min-h-[520px] flex-1 overflow-hidden">
         <div className="grid h-full min-h-0 grid-cols-[340px_1fr]">
           <div className="flex min-h-0 flex-col border-r">
             <div className="border-b px-4 py-3">
@@ -575,23 +525,6 @@ export function TranscriptView() {
           </div>
         </div>
       </div>
-    </div>
-  )
-}
-
-function RuleCard({ title, summary, items }: { title: string; summary: string; items: string[] }) {
-  return (
-    <div className="rounded-lg border bg-card/50 p-4">
-      <div className="mb-1 text-sm font-semibold">{title}</div>
-      <div className="mb-3 text-xs leading-relaxed text-muted-foreground">{summary}</div>
-      <ul className="space-y-1 text-xs text-foreground/90">
-        {items.map((item) => (
-          <li key={item} className="flex gap-2">
-            <span className="mt-[2px] h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
-            <span>{item}</span>
-          </li>
-        ))}
-      </ul>
     </div>
   )
 }

@@ -15,6 +15,7 @@ import type { EvidenceListFrontmatter } from "@/types/evidence"
 import { loadTranscriptRecord } from "@/lib/transcript/storage"
 import { buildTranscriptElementAlerts } from "@/lib/transcript/alerts"
 import { emptyEvidence } from "@/types/evidence"
+import { extractEvidenceDraftFromSources } from "@/lib/hearing/material-intelligence"
 
 const TABS: Array<{ id: HearingTab; label: string; icon: typeof Layers3 }> = [
   { id: "evidence", label: "证据清单", icon: Scale },
@@ -106,11 +107,13 @@ export function HearingWorkspaceView() {
 
 function EvidenceWorkspace({ onChanged, focusEvidenceId }: { onChanged: () => void; focusEvidenceId: string | null }) {
   const project = useWikiStore((s) => s.project)
+  const llmConfig = useWikiStore((s) => s.llmConfig)
   const root = project ? normalizePath(project.path) : ""
   const [pages, setPages] = useState<string[]>([])
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [content, setContent] = useState<string>("")
   const [loading, setLoading] = useState(true)
+  const [autoBusy, setAutoBusy] = useState("")
 
   const refreshPages = useCallback(async () => {
     if (!root) return
@@ -148,6 +151,55 @@ function EvidenceWorkspace({ onChanged, focusEvidenceId }: { onChanged: () => vo
     onChanged()
   }
 
+  async function ensureTargetPath(): Promise<string | null> {
+    if (selectedPath) return selectedPath
+    if (!root) return null
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "")
+    const path = `${root}/wiki/证据清单/证据清单-${stamp}-${Date.now().toString().slice(-4)}.md`
+    await writeFile(path, buildEmptyEvidencePage())
+    await refreshPages()
+    setSelectedPath(path)
+    onChanged()
+    return path
+  }
+
+  async function handleAutoExtractEvidence() {
+    if (!project) return
+    setAutoBusy("正在扫描原始材料并提炼证据...")
+    try {
+      const sourceTree = await listDirectory(`${root}/raw/sources`).catch(() => [] as FileNode[])
+      const sourceFiles = flatten(sourceTree)
+        .filter((file) => !file.is_dir && !file.path.includes("/.cache/"))
+        .map((file) => file.path)
+      const draft = await extractEvidenceDraftFromSources({
+        projectPath: project.path,
+        sourcePaths: sourceFiles,
+        llmConfig,
+      })
+      const targetPath = await ensureTargetPath()
+      if (!targetPath) return
+      const raw = await readFile(targetPath)
+      const parsed = parseFrontmatter<Partial<EvidenceListFrontmatter>>(raw)
+      const existing = parsed.data.evidences ?? []
+      const merged = [...existing, ...draft.items]
+      const next = writeFrontmatter(raw, {
+        type: "evidence-list",
+        title: parsed.data.title ?? "证据清单",
+        case_number: parsed.data.case_number ?? "",
+        updated: new Date().toISOString().slice(0, 10),
+        evidences: merged,
+      } satisfies EvidenceListFrontmatter)
+      await writeFile(targetPath, next)
+      setContent(next)
+      onChanged()
+      await refreshPages()
+      setSelectedPath(targetPath)
+      setAutoBusy(draft.note)
+    } catch (error) {
+      setAutoBusy(`自动提炼失败：${String(error)}`)
+    }
+  }
+
   const currentName = useMemo(() => selectedPath?.split("/").pop() || "未选择", [selectedPath])
 
   return (
@@ -155,7 +207,13 @@ function EvidenceWorkspace({ onChanged, focusEvidenceId }: { onChanged: () => vo
       <div className="flex min-h-0 flex-col border-r">
         <div className="border-b px-4 py-3">
           <div className="mb-2 text-sm font-semibold">证据清单页面</div>
-          <Button className="w-full" onClick={handleCreate}>新建证据清单</Button>
+          <div className="space-y-2">
+            <Button className="w-full" onClick={handleCreate}>新建证据清单</Button>
+            <Button variant="outline" className="w-full" onClick={handleAutoExtractEvidence}>
+              从材料自动提炼证据
+            </Button>
+            {autoBusy && <div className="text-[11px] text-muted-foreground">{autoBusy}</div>}
+          </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {loading ? (

@@ -78,6 +78,7 @@ npm run lawbase:pack -- \
 - `--max-consecutive-download-failures`：连续多少个法规下载失败后进入冷却，默认 8。
 - `--retry-failures`：先读取并重跑 `download-failures.json` 中的失败项。
 - `--compile-incremental`：仅编译新增/变更原件，复用历史编译结果。
+- `--core-profile`：先下载预设核心法清单，再进入自动发现/编译。当前支持：`court-basic`、`court-medical`。
 
 先小范围试跑：
 
@@ -99,6 +100,35 @@ npm run lawbase:pack -- \
   --cooldown-on-redirect 90 \
   --output-dir lawbase-pack
 ```
+
+核心法优先包（建议先跑）：
+
+```bash
+npm run lawbase:pack -- \
+  --core-profile court-basic \
+  --compile-incremental \
+  --output-dir lawbase-pack-core
+```
+
+说明：
+
+- `court-basic` 会优先下载法院高频基础法、行政法规和若干核心司法解释。
+- 适合先做一套“全国性核心法 + 高频程序法 + 医疗事故/证据规则”的基础包，再叠加地方性法规。
+- 若后续还要补地方性法规，可再在同一输出目录上执行 `--discover-flk`。
+
+医疗专题包示例：
+
+```bash
+npm run lawbase:pack -- \
+  --core-profile court-medical \
+  --compile-incremental \
+  --output-dir lawbase-pack-medical
+```
+
+说明：
+
+- `court-medical` 会优先下载医疗事故/医疗纠纷案件常用法律、行政法规和证据规则。
+- 适合医疗损害责任纠纷、医疗事故争议等案件先行导入。
 
 分批下载示例（适合 2-3 万条规模）：
 

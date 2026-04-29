@@ -24,6 +24,21 @@ export async function preprocessFile(path: string): Promise<string> {
   return invoke<string>("preprocess_file", { path })
 }
 
+export async function readPreloadedLawPack(): Promise<string> {
+  return invoke<string>("read_preloaded_law_pack")
+}
+
+export interface OcrStatus {
+  paddleocr: boolean
+  tesseract: boolean
+  ocrmypdf: boolean
+}
+
+export async function getOcrStatus(): Promise<OcrStatus> {
+  const raw = await invoke<string>("ocr_status")
+  return JSON.parse(raw) as OcrStatus
+}
+
 export async function deleteFile(path: string): Promise<void> {
   return invoke("delete_file", { path })
 }

@@ -46,12 +46,13 @@ function flatten(nodes: FileNode[]): FileNode[] {
 
 function scoreFile(name: string): number {
   const n = name.toLowerCase()
-  if (/[起诉状|答辩状|立案|受理|传票|开庭|判决|裁定|笔录]/.test(name)) return 100
+  if (/(起诉状|答辩状|立案|受理|传票|开庭|判决|裁定|笔录)/.test(name)) return 100
   if (n.endsWith(".pdf") || n.endsWith(".doc") || n.endsWith(".docx")) return 60
   return 20
 }
 
 function detectCaseType(text: string): CaseMeta["caseType"] | "" {
+  text = normalizeLegalText(text)
   if (/刑事|公诉机关|被告人|罪/.test(text)) return "刑事"
   if (/行政机关|行政行为|行政处罚|行政诉讼/.test(text)) return "行政"
   if (/执行|申请执行人|被执行人/.test(text)) return "执行"
@@ -60,6 +61,7 @@ function detectCaseType(text: string): CaseMeta["caseType"] | "" {
 }
 
 function detectSubtype(text: string): string {
+  text = normalizeLegalText(text)
   const candidates = [
     "民间借贷纠纷",
     "买卖合同纠纷",
@@ -74,31 +76,77 @@ function detectSubtype(text: string): string {
 }
 
 function detectCause(text: string): string {
+  text = normalizeLegalText(text)
   const subtype = detectSubtype(text)
   if (subtype) return subtype
   const match = text.match(/案由[：:\s]*([^\n，。；]{2,40})/)
-  return match?.[1]?.trim() || ""
+  if (match?.[1]) return match[1].trim()
+  const matches = [...text.matchAll(/([一-龥]{2,20}(?:纠纷|争议))一案/g)]
+    .map((m) => m[1].trim())
+    .sort((a, b) => a.length - b.length)
+  return matches[0] || ""
 }
 
 function extractCaseNumber(text: string): string {
+  const compact = normalizeLegalText(text)
   const patterns = [
-    /（\d{4}）[^ \n]{0,20}(?:民初|民终|刑初|刑终|行初|行终|执)[^ \n，。；]{0,20}号/,
-    /\(\d{4}\)[^ \n]{0,20}(?:民初|民终|刑初|刑终|行初|行终|执)[^ \n，。；]{0,20}号/,
+    /[（(]\d{4}[）)][^ \n，。；]{0,30}(?:民初|民终|民申|民再|刑初|刑终|刑申|行初|行终|行申|执|执异|执复)[^ \n，。；]{0,30}号/,
+    /[（(]\d{4}[）)][^ \n，。；]{0,30}号/,
   ]
   for (const pattern of patterns) {
-    const match = text.match(pattern)
-    if (match?.[0]) return match[0]
+    const matches = [...compact.matchAll(new RegExp(pattern.source, "g"))]
+      .map((m) => m[0])
+      .filter((value) => !/X{2,}|某/.test(value))
+    if (matches[0]) return matches[0]
   }
   return ""
 }
 
 function extractCourtName(text: string): string {
-  const match = text.match(/[^\s，。；]{2,30}人民法院/)
+  const compact = normalizeLegalText(text)
+  const match = compact.match(/[^\s，。；]{2,30}人民法院/)
   return match?.[0]?.trim() || ""
 }
 
-function clip(text: string, max = 5000): string {
+function detectProcedureStage(text: string): string {
+  text = normalizeLegalText(text)
+  if (/民事判决书|刑事判决书|行政判决书/.test(text)) return "已裁判"
+  if (/民事裁定书|刑事裁定书|行政裁定书/.test(text)) return "已裁定"
+  if (/开庭笔录|庭审笔录/.test(text)) return "已开庭"
+  if (/传票|开庭时间/.test(text)) return "待开庭"
+  return ""
+}
+
+function extractPresidingJudge(text: string): string {
+  const compact = normalizeLegalText(text)
+  const match = compact.match(/(?:审判长|审判员|代理审判员)[：:\s]*([一-龥]{2,4}?)(?=(?:审判长|审判员|代理审判员|书记员|$))/)
+  return match?.[1]?.trim() || ""
+}
+
+function extractClerk(text: string): string {
+  const compact = normalizeLegalText(text)
+  const match = compact.match(/书记员[：:\s]*([一-龥]{2,4}?)(?=(?:附注|记录|$))/)
+  return match?.[1]?.trim() || ""
+}
+
+function inferCaseNameFromText(text: string, fallback: string): string {
+  text = normalizeLegalText(text)
+  const court = extractCourtName(text)
+  const docType = text.match(/(民事|刑事|行政|执行)?(判决书|裁定书|调解书)/)?.[0]
+  if (court && docType) return `${court}${docType}`
+  return fallback
+}
+
+function clip(text: string, max = 12000): string {
   return text.length > max ? text.slice(0, max) : text
+}
+
+function normalizeLegalText(text: string): string {
+  return text
+    .replace(/[ \t]+/g, "")
+    .replace(/[（]/g, "(")
+    .replace(/[）]/g, ")")
+    .replace(/[\r\n]+/g, "\n")
 }
 
 function extractJsonObject(raw: string): string {
@@ -144,31 +192,55 @@ export async function extractCaseMetaSuggestion(
     .slice(0, 5)
 
   const snippets: Array<{ name: string; text: string }> = []
+  let firstRawSource = ""
   for (const file of files) {
     try {
-      const text = file.name.endsWith(".pdf") || file.name.endsWith(".doc") || file.name.endsWith(".docx")
-        ? await preprocessFile(file.path)
-        : await readFile(file.path)
+      let text = await readFile(file.path).catch(() => "")
+      if (!text.trim() && (file.name.endsWith(".pdf") || file.name.endsWith(".doc") || file.name.endsWith(".docx"))) {
+        text = await preprocessFile(file.path)
+      }
       const normalized = (text || "").trim()
-      if (normalized) snippets.push({ name: file.name, text: clip(normalized) })
+      if (normalized) {
+        if (!firstRawSource) firstRawSource = file.name
+        snippets.push({ name: file.name, text: clip(normalized) })
+      }
+    } catch {
+      // ignore
+    }
+  }
+  const wikiTree = await listDirectory(`${root}/wiki`).catch(() => [] as FileNode[])
+  const wikiFiles = flatten(wikiTree)
+    .filter((file) => file.name.endsWith(".md") && !file.name.startsWith("."))
+    .sort((a, b) => scoreFile(b.name) - scoreFile(a.name))
+    .slice(0, 8)
+  for (const file of wikiFiles) {
+    try {
+      const text = await readFile(file.path)
+      const normalized = (text || "").replace(/^---[\s\S]*?---/, "").trim()
+      if (normalized) snippets.push({ name: file.name, text: clip(normalized, 6000) })
     } catch {
       // ignore
     }
   }
 
   const combined = snippets.map((item) => `### 来源文件：${item.name}\n${item.text}`).join("\n\n")
+  const normalizedCombined = normalizeLegalText(combined)
   const seedText = combined || fallbackCaseName
+  const normalizedSeedText = normalizedCombined || fallbackCaseName
 
   const values: Partial<CaseMeta> = {
-    caseName: fallbackCaseName,
-    caseNumber: extractCaseNumber(seedText),
-    courtName: extractCourtName(seedText),
-    cause: detectCause(seedText),
-    caseType: detectCaseType(seedText) || undefined,
-    subtype: detectSubtype(seedText),
+    caseName: inferCaseNameFromText(normalizedSeedText, fallbackCaseName),
+    caseNumber: extractCaseNumber(normalizedSeedText),
+    courtName: extractCourtName(normalizedSeedText),
+    cause: detectCause(normalizedSeedText),
+    caseType: detectCaseType(normalizedSeedText) || undefined,
+    subtype: detectSubtype(normalizedSeedText),
+    presidingJudge: extractPresidingJudge(normalizedSeedText),
+    clerk: extractClerk(normalizedSeedText),
+    procedureStage: detectProcedureStage(normalizedSeedText),
   }
 
-  const firstSource = snippets[0]?.name
+  const firstSource = firstRawSource || snippets[0]?.name
   const sourceHints: Partial<Record<CaseMetaField, string>> = {}
   const candidates: Partial<Record<CaseMetaField, Array<{ value: string; source: string }>>> = {}
   if (values.caseNumber && firstSource) sourceHints.caseNumber = firstSource
@@ -181,6 +253,22 @@ export async function extractCaseMetaSuggestion(
   if (values.cause && firstSource) candidates.cause = [{ value: values.cause, source: firstSource }]
   if (values.caseType && firstSource) candidates.caseType = [{ value: values.caseType, source: firstSource }]
   if (values.subtype && firstSource) candidates.subtype = [{ value: values.subtype, source: firstSource }]
+  if (values.presidingJudge && firstSource) candidates.presidingJudge = [{ value: values.presidingJudge, source: firstSource }]
+  if (values.clerk && firstSource) candidates.clerk = [{ value: values.clerk, source: firstSource }]
+
+  const hasCoreRuleBasedFields = Boolean(values.caseNumber || values.courtName || values.cause || values.procedureStage)
+  if (hasCoreRuleBasedFields) {
+    const conflicts = (Object.entries(candidates) as Array<[CaseMetaField, Array<{ value: string; source: string }>]>)
+      .filter(([, items]) => uniqueCandidates(items).length > 1)
+      .map(([field]) => field)
+    return {
+      values,
+      sourceHints,
+      candidates,
+      conflicts,
+      note: "已根据原始材料正文快速识别案件主数据，请人工确认。",
+    }
+  }
 
   if (!hasUsableLlm(llmConfig) || !combined) {
     const conflicts = (Object.entries(candidates) as Array<[CaseMetaField, Array<{ value: string; source: string }>]>)

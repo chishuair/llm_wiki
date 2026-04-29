@@ -221,6 +221,7 @@ function RawSourcesSection() {
   const project = useWikiStore((s) => s.project)
   const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
   const selectedFile = useWikiStore((s) => s.selectedFile)
+  const fileTree = useWikiStore((s) => s.fileTree)
   const [expanded, setExpanded] = useState(false)
   const [sources, setSources] = useState<FileNode[]>([])
 
@@ -230,7 +231,7 @@ function RawSourcesSection() {
     listDirectory(`${pp}/raw/sources`)
       .then((tree) => setSources(flattenAllFiles(tree)))
       .catch(() => setSources([]))
-  }, [project])
+  }, [project, fileTree])
 
   if (sources.length === 0) return null
 

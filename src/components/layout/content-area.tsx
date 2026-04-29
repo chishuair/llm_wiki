@@ -7,6 +7,7 @@ import { HearingWorkspaceView } from "@/components/hearing/hearing-workspace-vie
 import { CaseDashboardView } from "@/components/dashboard/case-dashboard-view"
 import { ToolsHubView } from "@/components/tools/tools-hub-view"
 import { WorksheetView } from "@/components/worksheet/worksheet-view"
+import { ChatPanel } from "@/components/chat/chat-panel"
 
 export function ContentArea() {
   const activeView = useWikiStore((s) => s.activeView)
@@ -14,6 +15,8 @@ export function ContentArea() {
   switch (activeView) {
     case "dashboard":
       return <CaseDashboardView />
+    case "wiki":
+      return <ChatPanel />
     case "settings":
       return <SettingsView />
     case "sources":
@@ -27,7 +30,6 @@ export function ContentArea() {
     case "legal-doc":
       return <LegalDocView />
     case "tools":
-    case "wiki":
     case "search":
     case "graph":
     case "lint":
