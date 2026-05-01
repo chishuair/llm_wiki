@@ -7,6 +7,53 @@ import traceback
 from pathlib import Path
 
 
+def _prepend_path(path: Path) -> None:
+    if not path.exists():
+        return
+    current = os.environ.get("PATH", "")
+    prefix = str(path)
+    if prefix not in current:
+        os.environ["PATH"] = f"{prefix}{os.pathsep}{current}" if current else prefix
+    if os.name == "nt":
+        try:
+            os.add_dll_directory(prefix)
+        except (AttributeError, FileNotFoundError, OSError):
+            # Older Python or restricted environments — PATH is still best-effort.
+            pass
+
+
+def configure_paddle_runtime_paths() -> None:
+    """Ensure Paddle can load MKL / OpenMP DLLs on Windows frozen builds."""
+    candidates: list[Path] = []
+
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            meipass_path = Path(meipass).resolve()
+            candidates.append(meipass_path)
+            candidates.append(meipass_path / "paddle" / "libs")
+            candidates.append(meipass_path / "_internal" / "paddle" / "libs")
+
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir)
+        candidates.append(exe_dir / "_internal")
+        candidates.append(exe_dir / "_internal" / "paddle" / "libs")
+        candidates.append(exe_dir / "paddle" / "libs")
+
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("paddle")
+        if spec and spec.origin:
+            paddle_dir = Path(spec.origin).resolve().parent
+            candidates.append(paddle_dir / "libs")
+    except Exception:
+        pass
+
+    for path in candidates:
+        _prepend_path(path)
+
+
 def configure_offline_home():
     # In the frozen sidecar, keep PaddleX model lookup inside resources/ocr.
     # The prepared installer ships resources/ocr/.paddlex/official_models.
@@ -45,6 +92,7 @@ def collect_texts(value):
 
 def main() -> int:
     configure_offline_home()
+    configure_paddle_runtime_paths()
 
     if len(sys.argv) < 2:
         print("usage: paddleocr-sidecar <image-or-pdf-path>", file=sys.stderr)

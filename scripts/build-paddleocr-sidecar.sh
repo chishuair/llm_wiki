@@ -32,6 +32,7 @@ fi
   --clean \
   --onefile \
   --name paddleocr-sidecar \
+  --collect-all paddle \
   --collect-all paddleocr \
   --collect-all paddlex \
   --copy-metadata paddleocr \
