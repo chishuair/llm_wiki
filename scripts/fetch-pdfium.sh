@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download the platform-appropriate PDFium dynamic library from
-# bblanchon/pdfium-binaries into src-tauri/pdfium/. Invoked by CI
+# bblanchon/pdfium-binaries into resources/pdfium/. Invoked by CI
 # before `tauri build` and can also be run locally.
 #
 # Usage:
@@ -40,8 +40,10 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEST="$REPO_ROOT/src-tauri/pdfium"
+DEST="$REPO_ROOT/resources/pdfium"
+LEGACY_DEST="$REPO_ROOT/src-tauri/pdfium"
 mkdir -p "$DEST"
+mkdir -p "$LEGACY_DEST"
 
 case "$PLATFORM" in
   mac-arm64|mac-x64|linux-x64|linux-arm64|win-x64|win-arm64)
@@ -91,6 +93,7 @@ if [[ ! -f "$SRC" ]]; then
 fi
 
 cp "$SRC" "$EXPECTED"
+cp "$SRC" "$LEGACY_DEST/$(basename "$EXPECTED")"
 
 if [[ ! -f "$EXPECTED" ]]; then
   echo "[fetch-pdfium] ERROR: copy failed — $EXPECTED does not exist" >&2

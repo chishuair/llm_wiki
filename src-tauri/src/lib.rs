@@ -39,6 +39,7 @@ pub fn run() {
             commands::fs::preprocess_file,
             commands::fs::read_preloaded_law_pack,
             commands::fs::ocr_status,
+            commands::fs::local_capabilities_status,
             commands::fs::delete_file,
             commands::fs::find_related_wiki_pages,
             commands::fs::create_directory,
@@ -84,7 +85,11 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
                 if !has_visible_windows {
                     use tauri::Manager;
                     if let Some(window) = app.get_webview_window("main") {

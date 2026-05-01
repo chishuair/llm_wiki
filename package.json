@@ -10,6 +10,10 @@
     "test": "vitest run --exclude='**/*.real-llm.test.ts'",
     "test:llm": "RUN_LLM_TESTS=1 vitest run real-llm --no-file-parallelism --reporter=verbose",
     "lawbase:pack": "python3 scripts/lawbase-sync/build_lawpack.py",
+    "ocr:sidecar": "scripts/build-paddleocr-sidecar.sh",
+    "offline:prepare": "scripts/prepare-offline-resources.sh",
+    "offline:prepare:win": "powershell -ExecutionPolicy Bypass -File scripts/prepare-offline-resources.ps1",
+    "tauri:offline": "npm run offline:prepare && npm run tauri build",
     "tauri": "tauri"
   },
   "dependencies": {

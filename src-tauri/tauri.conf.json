@@ -31,6 +31,7 @@
     "active": true,
     "targets": "all",
     "resources": [
+      "../resources",
       "../lawbase-pack-full/lawbase-pack.json",
       "../lawbase-pack-full/manifest.json"
     ],

@@ -1,0 +1,194 @@
+name: Build Release Packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64 offline installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Install Windows packaging tools
+        shell: pwsh
+        run: |
+          choco install nsis protoc -y --no-progress
+
+      - name: Install npm dependencies
+        shell: pwsh
+        run: npm ci
+
+      - name: Prepare bundled lawbase and docs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resources\lawbase | Out-Null
+          New-Item -ItemType Directory -Force -Path resources\docs | Out-Null
+          if (-not (Test-Path "resources\lawbase\lawbase-pack.json")) {
+            Copy-Item "lawbase-pack-full\lawbase-pack.json" "resources\lawbase\lawbase-pack.json" -Force
+          }
+          if ((Test-Path "lawbase-pack-full\manifest.json") -and -not (Test-Path "resources\lawbase\manifest.json")) {
+            Copy-Item "lawbase-pack-full\manifest.json" "resources\lawbase\manifest.json" -Force
+          }
+          if (-not (Test-Path "resources\docs\offline-help.md")) {
+            "AI Case Wiki offline help placeholder." | Out-File "resources\docs\offline-help.md" -Encoding utf8
+          }
+
+      - name: Prepare Windows PDFium
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resources\pdfium | Out-Null
+          $archive = "$env:RUNNER_TEMP\pdfium-win-x64.tgz"
+          $extractDir = "$env:RUNNER_TEMP\pdfium-win-x64"
+          Invoke-WebRequest `
+            -Uri "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz" `
+            -OutFile $archive
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          tar -xzf $archive -C $extractDir
+          Copy-Item "$extractDir\bin\pdfium.dll" "resources\pdfium\pdfium.dll" -Force
+          if (-not (Test-Path "resources\pdfium\pdfium.dll")) {
+            throw "Missing resources\pdfium\pdfium.dll"
+          }
+
+      - name: Install PaddleOCR build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -U pip
+          python -m pip install paddlepaddle paddleocr "paddlex[ocr-core]" pyinstaller
+
+      - name: Build PaddleOCR sidecar
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resources\ocr | Out-Null
+          python -m PyInstaller `
+            --clean `
+            --onefile `
+            --name paddleocr-sidecar `
+            --collect-all paddleocr `
+            --collect-all paddlex `
+            --copy-metadata paddleocr `
+            --copy-metadata paddlepaddle `
+            --copy-metadata paddlex `
+            --copy-metadata imagesize `
+            --copy-metadata opencv-contrib-python `
+            --copy-metadata pyclipper `
+            --copy-metadata pypdfium2 `
+            --copy-metadata python-bidi `
+            --copy-metadata shapely `
+            --distpath resources\ocr `
+            --workpath .offline-build\paddleocr-sidecar\work `
+            --specpath .offline-build\paddleocr-sidecar\spec `
+            scripts\ocr-sidecar\paddleocr_sidecar.py
+          if (-not (Test-Path "resources\ocr\paddleocr-sidecar.exe")) {
+            throw "Missing resources\ocr\paddleocr-sidecar.exe"
+          }
+
+      - name: Warm OCR models and smoke test
+        shell: pwsh
+        run: |
+          @'
+          from PIL import Image, ImageDraw
+          path = "ocr-smoke.png"
+          image = Image.new("RGB", (320, 120), "white")
+          draw = ImageDraw.Draw(image)
+          draw.text((20, 40), "test 123", fill="black")
+          image.save(path)
+          '@ | python -
+
+          $sidecar = Resolve-Path "resources\ocr\paddleocr-sidecar.exe"
+          $smoke = Resolve-Path "ocr-smoke.png"
+
+          & $sidecar $smoke
+
+          $models = "resources\ocr\.paddlex\official_models"
+          if (-not (Test-Path $models)) {
+            throw "Missing OCR model cache at $models"
+          }
+
+          $tempProfile = Join-Path $env:RUNNER_TEMP "ocr-empty-profile"
+          New-Item -ItemType Directory -Force -Path $tempProfile | Out-Null
+          $oldHome = $env:HOME
+          $oldUserProfile = $env:USERPROFILE
+          try {
+            $env:HOME = $tempProfile
+            $env:USERPROFILE = $tempProfile
+            $output = & $sidecar $smoke
+            $parsed = $output | ConvertFrom-Json
+            if (-not $parsed.text) {
+              throw "OCR smoke test returned empty text"
+            }
+          } finally {
+            $env:HOME = $oldHome
+            $env:USERPROFILE = $oldUserProfile
+          }
+
+      - name: Verify offline resources
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\prepare-offline-resources.ps1
+
+      - name: Build frontend
+        shell: pwsh
+        run: npm run build
+
+      - name: Check Rust backend
+        shell: pwsh
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Tauri Windows installer
+        shell: pwsh
+        env:
+          # Optional signing placeholders for future use:
+          # WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          # WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CI: "true"
+        run: npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Collect distributables
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe" artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\*.exe" artifacts\ -ErrorAction SilentlyContinue
+          if (-not (Get-ChildItem artifacts -File)) {
+            throw "No Windows distributables found"
+          }
+          Get-ChildItem artifacts -File | Format-Table Name, Length
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-case-wiki-windows-x64
+          path: artifacts/*
+          if-no-files-found: error
+
+  # Future matrix candidates:
+  # - macos-latest: build DMG with resources/pdfium/libpdfium.dylib and macOS sidecar.
+  # - ubuntu-latest: build deb/appimage with resources/pdfium/libpdfium.so and Linux sidecar.

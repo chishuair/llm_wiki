@@ -3,7 +3,8 @@ use std::io::Read as IoRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use calamine::{Reader, open_workbook_auto, Data};
+use calamine::{open_workbook_auto, Data, Reader};
+use serde::Serialize;
 
 use crate::panic_guard::run_guarded;
 use crate::types::wiki::FileNode;
@@ -14,11 +15,56 @@ const IMAGE_EXTS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "avif", "heic", "heif", "svg",
 ];
 const MEDIA_EXTS: &[&str] = &[
-    "mp4", "webm", "mov", "avi", "mkv", "flv", "wmv", "m4v",
-    "mp3", "wav", "ogg", "flac", "aac", "m4a", "wma",
+    "mp4", "webm", "mov", "avi", "mkv", "flv", "wmv", "m4v", "mp3", "wav", "ogg", "flac", "aac",
+    "m4a", "wma",
 ];
 const LEGACY_DOC_EXTS: &[&str] = &["doc", "xls", "ppt", "pages", "numbers", "key", "epub"];
-const PRELOADED_LAW_PACK: &str = "lawbase-pack-full/lawbase-pack.json";
+const PRELOADED_LAW_PACK: &str = "resources/lawbase/lawbase-pack.json";
+const LEGACY_PRELOADED_LAW_PACK: &str = "lawbase-pack-full/lawbase-pack.json";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LawbaseStatus {
+    available: bool,
+    source: Option<String>,
+    version: Option<String>,
+    article_count: usize,
+    updated_at: Option<String>,
+    path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityStatus {
+    available: bool,
+    source: Option<String>,
+    version: Option<String>,
+    path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrCapabilityStatus {
+    available: bool,
+    source: Option<String>,
+    version: Option<String>,
+    path: Option<String>,
+    error: Option<String>,
+    bundled_sidecar: bool,
+    system_paddleocr: bool,
+    tesseract: bool,
+    ocrmypdf: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCapabilitiesStatus {
+    lawbase: LawbaseStatus,
+    ocr: OcrCapabilityStatus,
+    pdfium: CapabilityStatus,
+}
 
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String, String> {
@@ -48,20 +94,28 @@ pub fn read_file(path: String) -> Result<String, String> {
             e if IMAGE_EXTS.contains(&e) => extract_image_ocr_text(&path),
             e if MEDIA_EXTS.contains(&e) => {
                 let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                Ok(format!("[Media: {} ({:.1} MB)]", p.file_name().unwrap_or_default().to_string_lossy(), size as f64 / 1048576.0))
+                Ok(format!(
+                    "[Media: {} ({:.1} MB)]",
+                    p.file_name().unwrap_or_default().to_string_lossy(),
+                    size as f64 / 1048576.0
+                ))
             }
-            e if LEGACY_DOC_EXTS.contains(&e) => {
-                Ok(format!("[Document: {} — text extraction not supported for .{} format]",
-                    p.file_name().unwrap_or_default().to_string_lossy(), e))
-            }
+            e if LEGACY_DOC_EXTS.contains(&e) => Ok(format!(
+                "[Document: {} — text extraction not supported for .{} format]",
+                p.file_name().unwrap_or_default().to_string_lossy(),
+                e
+            )),
             _ => {
                 // Try reading as text; if it fails (binary), return a friendly message
                 match fs::read_to_string(&path) {
                     Ok(content) => Ok(content),
                     Err(_) => {
                         let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                        Ok(format!("[Binary file: {} ({:.1} KB)]",
-                            p.file_name().unwrap_or_default().to_string_lossy(), size as f64 / 1024.0))
+                        Ok(format!(
+                            "[Binary file: {} ({:.1} KB)]",
+                            p.file_name().unwrap_or_default().to_string_lossy(),
+                            size as f64 / 1024.0
+                        ))
                     }
                 }
             }
@@ -88,7 +142,7 @@ pub fn preprocess_file(path: String) -> Result<String, String> {
                 } else {
                     text
                 }
-            },
+            }
             e if OFFICE_EXTS.contains(&e) => extract_office_text(&path, e)?,
             e if IMAGE_EXTS.contains(&e) => extract_image_ocr_text(&path)?,
             _ => return Ok("no preprocessing needed".to_string()),
@@ -102,27 +156,40 @@ pub fn preprocess_file(path: String) -> Result<String, String> {
 #[tauri::command]
 pub fn read_preloaded_law_pack() -> Result<String, String> {
     run_guarded("read_preloaded_law_pack", || {
-        for path in preloaded_law_pack_candidates() {
+        for (path, _) in preloaded_law_pack_candidates() {
             if path.exists() {
                 return fs::read_to_string(&path)
                     .map_err(|e| format!("读取预置法规包失败：{} ({})", path.display(), e));
             }
         }
-        Err("未找到预置法规包 lawbase-pack-full/lawbase-pack.json".to_string())
+        Err("未找到预置法规包 resources/lawbase/lawbase-pack.json".to_string())
     })
 }
 
 #[tauri::command]
 pub fn ocr_status() -> Result<String, String> {
     run_guarded("ocr_status", || {
-        let paddle = command_ok("python3", &["-c", "import paddleocr; print('ok')"])
+        let bundled = bundled_ocr_sidecar().is_some();
+        let paddle = bundled
+            || command_ok("python3", &["-c", "import paddleocr; print('ok')"])
             || command_ok("python", &["-c", "import paddleocr; print('ok')"]);
         let tesseract = command_ok("tesseract", &["--version"]);
         let ocrmypdf = command_ok("ocrmypdf", &["--version"]);
         Ok(format!(
-            "{{\"paddleocr\":{},\"tesseract\":{},\"ocrmypdf\":{}}}",
-            paddle, tesseract, ocrmypdf
+            "{{\"paddleocr\":{},\"tesseract\":{},\"ocrmypdf\":{},\"bundledSidecar\":{}}}",
+            paddle, tesseract, ocrmypdf, bundled
         ))
+    })
+}
+
+#[tauri::command]
+pub fn local_capabilities_status() -> Result<LocalCapabilitiesStatus, String> {
+    run_guarded("local_capabilities_status", || {
+        Ok(LocalCapabilitiesStatus {
+            lawbase: lawbase_status(),
+            ocr: ocr_capability_status(),
+            pdfium: pdfium_status(),
+        })
     })
 }
 
@@ -134,39 +201,264 @@ fn command_ok(program: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn preloaded_law_pack_candidates() -> Vec<PathBuf> {
+fn preloaded_law_pack_candidates() -> Vec<(PathBuf, &'static str)> {
     let mut paths = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         // cwd 可能是项目根目录或 src-tauri/，分别尝试
-        paths.push(cwd.join(PRELOADED_LAW_PACK));
-        paths.push(cwd.join("..").join(PRELOADED_LAW_PACK));
-        paths.push(cwd.join("../..").join(PRELOADED_LAW_PACK));
+        push_law_pack_candidates(&mut paths, &cwd, "bundled-resource");
+        push_law_pack_candidates(&mut paths, &cwd.join(".."), "bundled-resource");
+        push_law_pack_candidates(&mut paths, &cwd.join("../.."), "bundled-resource");
     }
     if let Some(resource_dir) = RESOURCE_DIR_HINT.get() {
-        paths.push(resource_dir.join(PRELOADED_LAW_PACK));
-        paths.push(resource_dir.join("resources").join(PRELOADED_LAW_PACK));
+        push_law_pack_candidates(&mut paths, resource_dir, "bundled-resource");
+        push_law_pack_candidates(
+            &mut paths,
+            &resource_dir.join("resources"),
+            "bundled-resource",
+        );
+        push_law_pack_candidates(&mut paths, &resource_dir.join("_up_"), "bundled-resource");
+        push_law_pack_candidates(
+            &mut paths,
+            &resource_dir.join("_up_/resources"),
+            "bundled-resource",
+        );
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             // 发布包: exe 旁边
-            paths.push(exe_dir.join(PRELOADED_LAW_PACK));
-            paths.push(exe_dir.join("resources").join(PRELOADED_LAW_PACK));
-            paths.push(exe_dir.join("../Resources").join(PRELOADED_LAW_PACK));
+            push_law_pack_candidates(&mut paths, exe_dir, "bundled-resource");
+            push_law_pack_candidates(&mut paths, &exe_dir.join("resources"), "bundled-resource");
+            push_law_pack_candidates(
+                &mut paths,
+                &exe_dir.join("../Resources"),
+                "bundled-resource",
+            );
             // 开发模式: exe 在 src-tauri/target/debug/llm-wiki，往上 3-4 层找项目根
-            paths.push(exe_dir.join("../../..").join(PRELOADED_LAW_PACK));
-            paths.push(exe_dir.join("../../../..").join(PRELOADED_LAW_PACK));
+            push_law_pack_candidates(&mut paths, &exe_dir.join("../../.."), "bundled-resource");
+            push_law_pack_candidates(&mut paths, &exe_dir.join("../../../.."), "bundled-resource");
         }
     }
     paths
 }
 
+fn push_law_pack_candidates(
+    paths: &mut Vec<(PathBuf, &'static str)>,
+    base: &Path,
+    source: &'static str,
+) {
+    paths.push((base.join(PRELOADED_LAW_PACK), source));
+    paths.push((base.join(LEGACY_PRELOADED_LAW_PACK), "legacy-bundled"));
+}
+
+fn lawbase_status() -> LawbaseStatus {
+    for (path, source) in preloaded_law_pack_candidates() {
+        if !path.exists() {
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(raw) => return parse_lawbase_status(&raw, path, source),
+            Err(err) => {
+                return LawbaseStatus {
+                    available: false,
+                    source: Some(source.to_string()),
+                    version: None,
+                    article_count: 0,
+                    updated_at: None,
+                    path: Some(path.display().to_string()),
+                    error: Some(format!("读取法规库失败：{err}")),
+                };
+            }
+        }
+    }
+
+    LawbaseStatus {
+        available: false,
+        source: None,
+        version: None,
+        article_count: 0,
+        updated_at: None,
+        path: None,
+        error: Some("未找到内置法规库，请导入离线资源包。".to_string()),
+    }
+}
+
+fn parse_lawbase_status(raw: &str, path: PathBuf, source: &str) -> LawbaseStatus {
+    let parsed = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => value,
+        Err(err) => {
+            return LawbaseStatus {
+                available: false,
+                source: Some(source.to_string()),
+                version: None,
+                article_count: 0,
+                updated_at: None,
+                path: Some(path.display().to_string()),
+                error: Some(format!("法规库 JSON 格式错误：{err}")),
+            };
+        }
+    };
+
+    let manifest = parsed.get("manifest").and_then(|value| value.as_object());
+    let version = manifest
+        .and_then(|value| value.get("version"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let updated_at = manifest
+        .and_then(|value| {
+            value
+                .get("generated_at")
+                .or_else(|| value.get("updated_at"))
+                .or_else(|| value.get("updatedAt"))
+        })
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let article_count = parsed
+        .get("codes")
+        .and_then(|value| value.as_array())
+        .map(|codes| {
+            codes
+                .iter()
+                .map(|code| {
+                    code.get("articles")
+                        .and_then(|value| value.as_array())
+                        .map(|articles| articles.len())
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+
+    LawbaseStatus {
+        available: article_count > 0,
+        source: Some(source.to_string()),
+        version,
+        article_count,
+        updated_at,
+        path: Some(path.display().to_string()),
+        error: if article_count > 0 {
+            None
+        } else {
+            Some("法规库为空或缺少 codes[].articles。".to_string())
+        },
+    }
+}
+
+fn ocr_capability_status() -> OcrCapabilityStatus {
+    let bundled = bundled_ocr_sidecar();
+    let system_paddleocr = command_ok("python3", &["-c", "import paddleocr; print('ok')"])
+        || command_ok("python", &["-c", "import paddleocr; print('ok')"]);
+    let tesseract = command_ok("tesseract", &["--version"]);
+    let ocrmypdf = command_ok("ocrmypdf", &["--version"]);
+    let available = bundled.is_some() || system_paddleocr || tesseract || ocrmypdf;
+
+    OcrCapabilityStatus {
+        available,
+        source: if bundled.is_some() {
+            Some("bundled-sidecar".to_string())
+        } else if system_paddleocr {
+            Some("system-paddleocr".to_string())
+        } else if tesseract {
+            Some("system-tesseract".to_string())
+        } else if ocrmypdf {
+            Some("system-ocrmypdf".to_string())
+        } else {
+            None
+        },
+        version: None,
+        path: bundled.as_ref().map(|path| path.display().to_string()),
+        error: if available {
+            None
+        } else {
+            Some("未找到内置 OCR sidecar，也未检测到系统 OCR。".to_string())
+        },
+        bundled_sidecar: bundled.is_some(),
+        system_paddleocr,
+        tesseract,
+        ocrmypdf,
+    }
+}
+
+fn bundled_ocr_sidecar() -> Option<PathBuf> {
+    bundled_ocr_sidecar_candidates()
+        .into_iter()
+        .find(|path| path.exists() && path.is_file())
+}
+
+fn bundled_ocr_sidecar_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let names: &[&str] = if cfg!(target_os = "windows") {
+        &["paddleocr-sidecar.exe", "paddleocr.exe", "ocr.exe"]
+    } else {
+        &["paddleocr-sidecar", "paddleocr", "ocr"]
+    };
+
+    let mut push_base = |base: &Path| {
+        for name in names {
+            paths.push(base.join("resources/ocr").join(name));
+            paths.push(base.join("ocr").join(name));
+        }
+    };
+
+    if let Ok(cwd) = std::env::current_dir() {
+        push_base(&cwd);
+        push_base(&cwd.join(".."));
+        push_base(&cwd.join("../.."));
+    }
+    if let Some(resource_dir) = RESOURCE_DIR_HINT.get() {
+        push_base(resource_dir);
+        push_base(&resource_dir.join("resources"));
+        push_base(&resource_dir.join("_up_"));
+        push_base(&resource_dir.join("_up_/resources"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            push_base(exe_dir);
+            push_base(&exe_dir.join("resources"));
+            push_base(&exe_dir.join("../Resources"));
+            push_base(&exe_dir.join("../../.."));
+            push_base(&exe_dir.join("../../../.."));
+        }
+    }
+    paths
+}
+
+fn pdfium_status() -> CapabilityStatus {
+    let existing_path = pdfium_candidate_paths()
+        .into_iter()
+        .find(|path| Path::new(path).exists());
+
+    if let Some(path) = existing_path {
+        return CapabilityStatus {
+            available: true,
+            source: Some("bundled-or-configured".to_string()),
+            version: None,
+            path: Some(path),
+            error: None,
+        };
+    }
+
+    match pdfium() {
+        Ok(_) => CapabilityStatus {
+            available: true,
+            source: Some("system".to_string()),
+            version: None,
+            path: None,
+            error: None,
+        },
+        Err(err) => CapabilityStatus {
+            available: false,
+            source: None,
+            version: None,
+            path: None,
+            error: Some(err),
+        },
+    }
+}
+
 fn cache_path_for(original: &Path) -> std::path::PathBuf {
     let parent = original.parent().unwrap_or(Path::new("."));
     let cache_dir = parent.join(".cache");
-    let file_name = original
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let file_name = original.file_name().unwrap_or_default().to_string_lossy();
     cache_dir.join(format!("{}.txt", file_name))
 }
 
@@ -186,8 +478,7 @@ fn write_cache(original: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = cache_path.parent() {
         fs::create_dir_all(parent).ok();
     }
-    fs::write(&cache_path, text)
-        .map_err(|e| format!("Failed to write cache: {}", e))
+    fs::write(&cache_path, text).map_err(|e| format!("Failed to write cache: {}", e))
 }
 
 fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
@@ -200,10 +491,56 @@ fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
         return Err(format!(
             "本地 OCR 命令 `{}` 执行失败：{}",
             program,
-            if stderr.is_empty() { "无错误输出".to_string() } else { stderr }
+            if stderr.is_empty() {
+                "无错误输出".to_string()
+            } else {
+                stderr
+            }
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn run_bundled_ocr_sidecar_text(path: &str) -> Result<String, String> {
+    let sidecar = bundled_ocr_sidecar().ok_or_else(|| "未找到内置 OCR sidecar".to_string())?;
+    let output = Command::new(&sidecar)
+        .arg(path)
+        .output()
+        .map_err(|e| format!("无法调用内置 OCR sidecar `{}`：{}", sidecar.display(), e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "内置 OCR sidecar 执行失败：{}",
+            if stderr.is_empty() {
+                "无错误输出".to_string()
+            } else {
+                stderr
+            }
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Err("内置 OCR sidecar 未识别到文本".to_string());
+    }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        if let Some(text) = json.get("text").and_then(|value| value.as_str()) {
+            if !text.trim().is_empty() {
+                return Ok(text.trim().to_string());
+            }
+        }
+        if let Some(pages) = json.get("pages").and_then(|value| value.as_array()) {
+            let text = pages
+                .iter()
+                .filter_map(|page| page.get("text").and_then(|value| value.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.trim().is_empty() {
+                return Ok(text);
+            }
+        }
+    }
+    Ok(stdout)
 }
 
 const PADDLE_OCR_PY: &str = r#"
@@ -268,6 +605,10 @@ except Exception as exc:
 "#;
 
 fn run_paddleocr_text(path: &str) -> Result<String, String> {
+    if let Ok(text) = run_bundled_ocr_sidecar_text(path) {
+        return Ok(text);
+    }
+
     let mut last_error = None;
     for python in ["python3", "python"] {
         match run_command_capture(python, &["-c", PADDLE_OCR_PY, path]) {
@@ -369,8 +710,7 @@ static PDFIUM: std::sync::OnceLock<Result<pdfium_render::prelude::Pdfium, String
 /// once the AppHandle is available. Lets the pdfium resolver find the
 /// bundled dylib without re-implementing Tauri's platform-specific
 /// resource-dir logic.
-static RESOURCE_DIR_HINT: std::sync::OnceLock<std::path::PathBuf> =
-    std::sync::OnceLock::new();
+static RESOURCE_DIR_HINT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Called from Tauri's setup() with the resolved resource directory.
 /// No-op if already set.
@@ -396,12 +736,32 @@ fn pdfium_candidate_paths() -> Vec<String> {
     // Tauri-resolved resource directory (set during setup()).
     if let Some(resource_dir) = RESOURCE_DIR_HINT.get() {
         #[cfg(target_os = "macos")]
-        v.push(
-            resource_dir
-                .join("libpdfium.dylib")
-                .to_string_lossy()
-                .into_owned(),
-        );
+        {
+            v.push(
+                resource_dir
+                    .join("libpdfium.dylib")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("pdfium/libpdfium.dylib")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("resources/pdfium/libpdfium.dylib")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("_up_/resources/pdfium/libpdfium.dylib")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
         #[cfg(target_os = "windows")]
         {
             v.push(
@@ -416,14 +776,52 @@ fn pdfium_candidate_paths() -> Vec<String> {
                     .to_string_lossy()
                     .into_owned(),
             );
+            v.push(
+                resource_dir
+                    .join("pdfium/pdfium.dll")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("resources/pdfium/pdfium.dll")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("_up_/resources/pdfium/pdfium.dll")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
         #[cfg(target_os = "linux")]
-        v.push(
-            resource_dir
-                .join("libpdfium.so")
-                .to_string_lossy()
-                .into_owned(),
-        );
+        {
+            v.push(
+                resource_dir
+                    .join("libpdfium.so")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("pdfium/libpdfium.so")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("resources/pdfium/libpdfium.so")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            v.push(
+                resource_dir
+                    .join("_up_/resources/pdfium/libpdfium.so")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
     }
 
     if let Ok(exe) = std::env::current_exe() {
@@ -440,6 +838,15 @@ fn pdfium_candidate_paths() -> Vec<String> {
                 //   Contents/Resources/libpdfium.dylib    ← fallback
                 push(&mut v, exe_dir.join("../Frameworks/libpdfium.dylib"));
                 push(&mut v, exe_dir.join("../Resources/libpdfium.dylib"));
+                push(&mut v, exe_dir.join("../Resources/pdfium/libpdfium.dylib"));
+                push(
+                    &mut v,
+                    exe_dir.join("../Resources/resources/pdfium/libpdfium.dylib"),
+                );
+                push(
+                    &mut v,
+                    exe_dir.join("../Resources/_up_/resources/pdfium/libpdfium.dylib"),
+                );
                 push(&mut v, exe_dir.join("libpdfium.dylib"));
             }
 
@@ -450,12 +857,30 @@ fn pdfium_candidate_paths() -> Vec<String> {
                 push(&mut v, exe_dir.join("pdfium.dll"));
                 push(&mut v, exe_dir.join("libpdfium.dll"));
                 push(&mut v, exe_dir.join("resources").join("pdfium.dll"));
+                push(&mut v, exe_dir.join("resources/pdfium/pdfium.dll"));
+                push(
+                    &mut v,
+                    exe_dir.join("resources/resources/pdfium/pdfium.dll"),
+                );
+                push(
+                    &mut v,
+                    exe_dir.join("resources/_up_/resources/pdfium/pdfium.dll"),
+                );
             }
 
             #[cfg(target_os = "linux")]
             {
                 push(&mut v, exe_dir.join("libpdfium.so"));
                 push(&mut v, exe_dir.join("resources").join("libpdfium.so"));
+                push(&mut v, exe_dir.join("resources/pdfium/libpdfium.so"));
+                push(
+                    &mut v,
+                    exe_dir.join("resources/resources/pdfium/libpdfium.so"),
+                );
+                push(
+                    &mut v,
+                    exe_dir.join("resources/_up_/resources/pdfium/libpdfium.so"),
+                );
                 push(&mut v, exe_dir.join("../lib/libpdfium.so"));
             }
         }
@@ -497,23 +922,23 @@ fn extract_pdf_text(path: &str) -> Result<String, String> {
     use pdfium_render::prelude::*;
     let pdfium = pdfium()?;
 
-    let doc = pdfium
-        .load_pdf_from_file(path, None)
-        .map_err(|e| match e {
-            PdfiumError::PdfiumLibraryInternalError(
-                PdfiumInternalError::PasswordError,
-            ) => format!(
-                "PDF is password-protected and cannot be read: '{}'",
-                path
-            ),
-            _ => format!("Failed to open PDF '{}': {}", path, e),
-        })?;
+    let doc = pdfium.load_pdf_from_file(path, None).map_err(|e| match e {
+        PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
+            format!("PDF is password-protected and cannot be read: '{}'", path)
+        }
+        _ => format!("Failed to open PDF '{}': {}", path, e),
+    })?;
 
     let mut out = String::new();
     for (idx, page) in doc.pages().iter().enumerate() {
-        let page_text = page
-            .text()
-            .map_err(|e| format!("Page {} text extraction failed in '{}': {}", idx + 1, path, e))?;
+        let page_text = page.text().map_err(|e| {
+            format!(
+                "Page {} text extraction failed in '{}': {}",
+                idx + 1,
+                path,
+                e
+            )
+        })?;
         out.push_str(&page_text.all());
         out.push('\n');
     }
@@ -533,8 +958,7 @@ fn extract_office_text(path: &str, ext: &str) -> Result<String, String> {
     }
 
     // PPTX and ODF: use ZIP-based parsing
-    let file = fs::File::open(path)
-        .map_err(|e| format!("Failed to open '{}': {}", path, e))?;
+    let file = fs::File::open(path).map_err(|e| format!("Failed to open '{}': {}", path, e))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("Failed to read ZIP archive '{}': {}", path, e))?;
 
@@ -602,7 +1026,9 @@ fn extract_docx_with_library(path: &str) -> Result<String, String> {
                 }
 
                 let text = para_text.trim().to_string();
-                if text.is_empty() { continue; }
+                if text.is_empty() {
+                    continue;
+                }
 
                 if is_heading {
                     let prefix = "#".repeat(heading_level as usize);
@@ -651,7 +1077,9 @@ fn extract_docx_with_library(path: &str) -> Result<String, String> {
                         result.push_str(" |\n");
                         if i == 0 {
                             result.push('|');
-                            for _ in 0..max_cols { result.push_str(" --- |"); }
+                            for _ in 0..max_cols {
+                                result.push_str(" --- |");
+                            }
                             result.push('\n');
                         }
                     }
@@ -719,7 +1147,9 @@ fn extract_docx_markdown(archive: &mut zip::ZipArchive<fs::File>) -> Result<Stri
             let tag_start = i;
             i += 1;
             let is_closing = i < len && chars[i] == '/';
-            if is_closing { i += 1; }
+            if is_closing {
+                i += 1;
+            }
 
             let mut tag_name = String::new();
             while i < len && chars[i] != '>' && chars[i] != ' ' && chars[i] != '/' {
@@ -733,7 +1163,9 @@ fn extract_docx_markdown(archive: &mut zip::ZipArchive<fs::File>) -> Result<Stri
                 tag_content.push(chars[i]);
                 i += 1;
             }
-            if i < len { i += 1; } // skip >
+            if i < len {
+                i += 1;
+            } // skip >
 
             match tag_name.as_str() {
                 // Paragraph start
@@ -776,16 +1208,26 @@ fn extract_docx_markdown(archive: &mut zip::ZipArchive<fs::File>) -> Result<Stri
                             }
                         }
                     }
-                    if tag_content.contains("ListParagraph") || tag_content.contains("listParagraph") {
+                    if tag_content.contains("ListParagraph")
+                        || tag_content.contains("listParagraph")
+                    {
                         in_list_item = true;
                     }
                 }
                 // Bold
-                "w:b" if !is_closing && !tag_content.contains("w:val=\"0\"") && !tag_content.contains("w:val=\"false\"") => {
+                "w:b"
+                    if !is_closing
+                        && !tag_content.contains("w:val=\"0\"")
+                        && !tag_content.contains("w:val=\"false\"") =>
+                {
                     is_bold = true;
                 }
                 // Italic
-                "w:i" if !is_closing && !tag_content.contains("w:val=\"0\"") && !tag_content.contains("w:val=\"false\"") => {
+                "w:i"
+                    if !is_closing
+                        && !tag_content.contains("w:val=\"0\"")
+                        && !tag_content.contains("w:val=\"false\"") =>
+                {
                     is_italic = true;
                 }
                 // Run end — apply formatting
@@ -874,8 +1316,16 @@ fn extract_pptx_markdown(archive: &mut zip::ZipArchive<fs::File>) -> Result<Stri
 
     // Sort by slide number
     slide_names.sort_by(|a, b| {
-        let num_a = a.trim_start_matches("ppt/slides/slide").trim_end_matches(".xml").parse::<u32>().unwrap_or(0);
-        let num_b = b.trim_start_matches("ppt/slides/slide").trim_end_matches(".xml").parse::<u32>().unwrap_or(0);
+        let num_a = a
+            .trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(0);
+        let num_b = b
+            .trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(0);
         num_a.cmp(&num_b)
     });
 
@@ -944,7 +1394,9 @@ fn extract_spreadsheet(path: &str) -> Result<String, String> {
 
     for sheet_name in &sheet_names {
         if let Ok(range) = workbook.worksheet_range(sheet_name) {
-            if range.is_empty() { continue; }
+            if range.is_empty() {
+                continue;
+            }
 
             if sheet_names.len() > 1 {
                 result.push_str(&format!("## {}\n\n", sheet_name));
@@ -954,8 +1406,9 @@ fn extract_spreadsheet(path: &str) -> Result<String, String> {
             let mut max_cols = 0;
 
             for row in range.rows() {
-                let cells: Vec<String> = row.iter().map(|cell| {
-                    match cell {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|cell| match cell {
                         Data::Empty => String::new(),
                         Data::String(s) => s.clone(),
                         Data::Float(f) => {
@@ -971,14 +1424,18 @@ fn extract_spreadsheet(path: &str) -> Result<String, String> {
                         Data::DateTimeIso(s) => s.clone(),
                         Data::DurationIso(s) => s.clone(),
                         Data::Error(e) => format!("ERR:{:?}", e),
-                    }
-                }).collect();
-                if cells.len() > max_cols { max_cols = cells.len(); }
+                    })
+                    .collect();
+                if cells.len() > max_cols {
+                    max_cols = cells.len();
+                }
                 rows.push(cells);
             }
 
             // Skip empty sheets
-            if rows.is_empty() || max_cols == 0 { continue; }
+            if rows.is_empty() || max_cols == 0 {
+                continue;
+            }
 
             for (i, row) in rows.iter().enumerate() {
                 let mut padded = row.clone();
@@ -991,7 +1448,9 @@ fn extract_spreadsheet(path: &str) -> Result<String, String> {
 
                 if i == 0 {
                     result.push('|');
-                    for _ in 0..max_cols { result.push_str(" --- |"); }
+                    for _ in 0..max_cols {
+                        result.push_str(" --- |");
+                    }
                     result.push('\n');
                 }
             }
@@ -1008,8 +1467,8 @@ fn extract_spreadsheet(path: &str) -> Result<String, String> {
 
 /// Extract OpenDocument format text (basic).
 fn extract_odf_text(archive: &mut zip::ZipArchive<fs::File>) -> Result<String, String> {
-    let xml = read_zip_file(archive, "content.xml")
-        .ok_or_else(|| "No content.xml found".to_string())?;
+    let xml =
+        read_zip_file(archive, "content.xml").ok_or_else(|| "No content.xml found".to_string())?;
 
     let mut result = String::new();
     let mut in_tag = false;
@@ -1027,7 +1486,11 @@ fn extract_odf_text(archive: &mut zip::ZipArchive<fs::File>) -> Result<String, S
     }
 
     let cleaned = decode_xml_entities(&result);
-    let lines: Vec<&str> = cleaned.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = cleaned
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
 
     if lines.is_empty() {
         Ok("[Could not extract text from this file]".to_string())
@@ -1044,8 +1507,7 @@ pub fn write_file(path: String, contents: String) -> Result<(), String> {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create parent dirs for '{}': {}", path, e))?;
         }
-        fs::write(&path, contents)
-            .map_err(|e| format!("Failed to write file '{}': {}", path, e))
+        fs::write(&path, contents).map_err(|e| format!("Failed to write file '{}': {}", path, e))
     })
 }
 
@@ -1096,11 +1558,7 @@ fn build_tree(dir: &Path, depth: usize, max_depth: usize) -> Result<Vec<FileNode
     let mut nodes = Vec::new();
     for entry in entries {
         let entry_path = entry.path();
-        let name = entry
-            .file_name()
-            .to_str()
-            .unwrap_or("")
-            .to_string();
+        let name = entry.file_name().to_str().unwrap_or("").to_string();
         // Always return forward-slash paths so the TS layer can compare
         // and compose paths consistently across Windows and Unix. Windows
         // APIs accept forward slashes, so normalizing here is safe and
@@ -1159,11 +1617,7 @@ pub fn copy_directory(source: String, destination: String) -> Result<Vec<String>
 
         let mut copied_files = Vec::new();
 
-        fn copy_recursive(
-            src: &Path,
-            dest: &Path,
-            files: &mut Vec<String>,
-        ) -> Result<(), String> {
+        fn copy_recursive(src: &Path, dest: &Path, files: &mut Vec<String>) -> Result<(), String> {
             fs::create_dir_all(dest)
                 .map_err(|e| format!("Failed to create dir '{}': {}", dest.display(), e))?;
 
@@ -1184,9 +1638,8 @@ pub fn copy_directory(source: String, destination: String) -> Result<Vec<String>
                 if path.is_dir() {
                     copy_recursive(&path, &dest_path, files)?;
                 } else {
-                    fs::copy(&path, &dest_path).map_err(|e| {
-                        format!("Failed to copy '{}': {}", path.display(), e)
-                    })?;
+                    fs::copy(&path, &dest_path)
+                        .map_err(|e| format!("Failed to copy '{}': {}", path.display(), e))?;
                     // Normalize to forward slashes for consistent cross-
                     // platform handling in the TS layer (see fs.rs build_tree).
                     files.push(dest_path.to_string_lossy().replace('\\', "/"));
@@ -1208,8 +1661,7 @@ pub fn delete_file(path: String) -> Result<(), String> {
             fs::remove_dir_all(&path)
                 .map_err(|e| format!("Failed to delete directory '{}': {}", path, e))
         } else {
-            fs::remove_file(&path)
-                .map_err(|e| format!("Failed to delete file '{}': {}", path, e))
+            fs::remove_file(&path).map_err(|e| format!("Failed to delete file '{}': {}", path, e))
         }
     })
 }
@@ -1217,7 +1669,10 @@ pub fn delete_file(path: String) -> Result<(), String> {
 /// Find wiki pages that reference a given source file name.
 /// Scans all .md files under wiki/ for the source filename in frontmatter or content.
 #[tauri::command]
-pub fn find_related_wiki_pages(project_path: String, source_name: String) -> Result<Vec<String>, String> {
+pub fn find_related_wiki_pages(
+    project_path: String,
+    source_name: String,
+) -> Result<Vec<String>, String> {
     run_guarded("find_related_wiki_pages", || {
         let wiki_dir = Path::new(&project_path).join("wiki");
         if !wiki_dir.is_dir() {
@@ -1230,7 +1685,11 @@ pub fn find_related_wiki_pages(project_path: String, source_name: String) -> Res
     })
 }
 
-fn collect_related_pages(dir: &Path, source_name: &str, results: &mut Vec<String>) -> Result<(), String> {
+fn collect_related_pages(
+    dir: &Path,
+    source_name: &str,
+    results: &mut Vec<String>,
+) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
 
     // Get just the filename without path — use Path for cross-platform separator handling
@@ -1250,7 +1709,11 @@ fn collect_related_pages(dir: &Path, source_name: &str, results: &mut Vec<String
         .rev()
         .collect::<Vec<_>>()
         .join(".");
-    let file_stem_lower = if file_stem.is_empty() { file_name_lower.clone() } else { file_stem.to_lowercase() };
+    let file_stem_lower = if file_stem.is_empty() {
+        file_name_lower.clone()
+    } else {
+        file_stem.to_lowercase()
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -1273,18 +1736,15 @@ fn collect_related_pages(dir: &Path, source_name: &str, results: &mut Vec<String
 
                 // Match 2: source summary page (wiki/sources/{stem}.md)
                 // Use Path component iteration to avoid hardcoded separator assumptions
-                let is_in_sources_dir = path
-                    .components()
-                    .any(|c| c.as_os_str() == "sources");
-                let is_source_summary = is_in_sources_dir
-                    && fname.to_lowercase().starts_with(&file_stem_lower);
+                let is_in_sources_dir = path.components().any(|c| c.as_os_str() == "sources");
+                let is_source_summary =
+                    is_in_sources_dir && fname.to_lowercase().starts_with(&file_stem_lower);
 
                 // Match 3: page was generated from this source (check frontmatter sources field)
                 let frontmatter_match = if let Some(fm_start) = content.find("---\n") {
                     if let Some(fm_end) = content[fm_start + 4..].find("\n---") {
                         let frontmatter = &content[fm_start..fm_start + 4 + fm_end].to_lowercase();
-                        frontmatter.contains("sources:")
-                            && frontmatter.contains(&file_name_lower)
+                        frontmatter.contains("sources:") && frontmatter.contains(&file_name_lower)
                     } else {
                         false
                     }
@@ -1358,7 +1818,10 @@ mod tests {
             // that no panic reaches the test runner and aborts the process.
             let result = read_file(path.clone());
             let _ = fs::remove_file(&path);
-            eprintln!("[{name}] => {:?}", result.as_ref().map(|s| &s[..s.len().min(80)]));
+            eprintln!(
+                "[{name}] => {:?}",
+                result.as_ref().map(|s| &s[..s.len().min(80)])
+            );
         }
     }
 
@@ -1400,7 +1863,8 @@ mod tests {
                     let p = entry.path();
                     if p.is_dir() {
                         walk(&p, out);
-                    } else if p.extension()
+                    } else if p
+                        .extension()
                         .and_then(|e| e.to_str())
                         .map(|e| e.eq_ignore_ascii_case("pdf"))
                         .unwrap_or(false)
@@ -1413,7 +1877,11 @@ mod tests {
         walk(root, &mut pdfs);
         pdfs.sort();
 
-        eprintln!("\n[pdf_probe] found {} PDFs under {}\n", pdfs.len(), root.display());
+        eprintln!(
+            "\n[pdf_probe] found {} PDFs under {}\n",
+            pdfs.len(),
+            root.display()
+        );
 
         let mut ok = 0usize;
         let mut err = 0usize;
@@ -1428,11 +1896,23 @@ mod tests {
             match result {
                 Ok(Ok(text)) => {
                     ok += 1;
-                    eprintln!("[{:>3}/{}] OK     ({:>7} chars)  {}", idx + 1, pdfs.len(), text.len(), display);
+                    eprintln!(
+                        "[{:>3}/{}] OK     ({:>7} chars)  {}",
+                        idx + 1,
+                        pdfs.len(),
+                        text.len(),
+                        display
+                    );
                 }
                 Ok(Err(e)) => {
                     err += 1;
-                    eprintln!("[{:>3}/{}] ERR    {}  →  {}", idx + 1, pdfs.len(), display, e);
+                    eprintln!(
+                        "[{:>3}/{}] ERR    {}  →  {}",
+                        idx + 1,
+                        pdfs.len(),
+                        display,
+                        e
+                    );
                 }
                 Err(payload) => {
                     panicked += 1;
@@ -1443,11 +1923,23 @@ mod tests {
                     } else {
                         "(non-string panic)".to_string()
                     };
-                    eprintln!("[{:>3}/{}] PANIC  {}  →  {}", idx + 1, pdfs.len(), display, msg);
+                    eprintln!(
+                        "[{:>3}/{}] PANIC  {}  →  {}",
+                        idx + 1,
+                        pdfs.len(),
+                        display,
+                        msg
+                    );
                 }
             }
         }
 
-        eprintln!("\n[pdf_probe] summary: {} OK / {} ERR / {} PANIC (total {})", ok, err, panicked, pdfs.len());
+        eprintln!(
+            "\n[pdf_probe] summary: {} OK / {} ERR / {} PANIC (total {})",
+            ok,
+            err,
+            panicked,
+            pdfs.len()
+        );
     }
 }

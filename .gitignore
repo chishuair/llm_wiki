@@ -16,6 +16,14 @@ src-tauri/gen/
 src-tauri/pdfium/*.dylib
 src-tauri/pdfium/*.dll
 src-tauri/pdfium/*.so
+resources/lawbase/lawbase-pack.json
+resources/lawbase/manifest.json
+resources/ocr/.paddlex/
+resources/ocr/paddleocr-sidecar
+resources/ocr/paddleocr-sidecar.exe
+resources/pdfium/*.dylib
+resources/pdfium/*.dll
+resources/pdfium/*.so
 
 # Environment files
 .env

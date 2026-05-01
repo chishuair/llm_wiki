@@ -32,11 +32,47 @@ export interface OcrStatus {
   paddleocr: boolean
   tesseract: boolean
   ocrmypdf: boolean
+  bundledSidecar?: boolean
 }
 
 export async function getOcrStatus(): Promise<OcrStatus> {
   const raw = await invoke<string>("ocr_status")
   return JSON.parse(raw) as OcrStatus
+}
+
+export interface LawbaseStatus {
+  available: boolean
+  source?: string
+  version?: string
+  articleCount: number
+  updatedAt?: string
+  path?: string
+  error?: string
+}
+
+export interface CapabilityStatus {
+  available: boolean
+  source?: string
+  version?: string
+  path?: string
+  error?: string
+}
+
+export interface OcrCapabilityStatus extends CapabilityStatus {
+  bundledSidecar: boolean
+  systemPaddleocr: boolean
+  tesseract: boolean
+  ocrmypdf: boolean
+}
+
+export interface LocalCapabilitiesStatus {
+  lawbase: LawbaseStatus
+  ocr: OcrCapabilityStatus
+  pdfium: CapabilityStatus
+}
+
+export async function getLocalCapabilitiesStatus(): Promise<LocalCapabilitiesStatus> {
+  return invoke<LocalCapabilitiesStatus>("local_capabilities_status")
 }
 
 export async function deleteFile(path: string): Promise<void> {

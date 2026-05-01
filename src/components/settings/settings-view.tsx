@@ -3,7 +3,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { getOcrStatus, type OcrStatus } from "@/commands/fs"
+import { getLocalCapabilitiesStatus, type LocalCapabilitiesStatus } from "@/commands/fs"
 
 export function SettingsView() {
   const llmConfig = useWikiStore((s) => s.llmConfig)
@@ -14,8 +14,8 @@ export function SettingsView() {
   const [apiKey, setApiKey] = useState(llmConfig.apiKey || "")
   const [model, setModel] = useState(llmConfig.model || "qwen2.5:14b")
   const [saved, setSaved] = useState(false)
-  const [ocrStatus, setOcrStatus] = useState<OcrStatus | null>(null)
-  const [checkingOcr, setCheckingOcr] = useState(false)
+  const [capabilities, setCapabilities] = useState<LocalCapabilitiesStatus | null>(null)
+  const [checkingCapabilities, setCheckingCapabilities] = useState(false)
 
   useEffect(() => {
     setEndpoint(llmConfig.customEndpoint || llmConfig.ollamaUrl || "http://localhost:11434")
@@ -23,19 +23,19 @@ export function SettingsView() {
     setModel(llmConfig.model || "qwen2.5:14b")
   }, [llmConfig.customEndpoint, llmConfig.ollamaUrl, llmConfig.apiKey, llmConfig.model])
 
-  async function refreshOcrStatus() {
-    setCheckingOcr(true)
+  async function refreshCapabilities() {
+    setCheckingCapabilities(true)
     try {
-      setOcrStatus(await getOcrStatus())
+      setCapabilities(await getLocalCapabilitiesStatus())
     } catch {
-      setOcrStatus({ paddleocr: false, tesseract: false, ocrmypdf: false })
+      setCapabilities(null)
     } finally {
-      setCheckingOcr(false)
+      setCheckingCapabilities(false)
     }
   }
 
   useEffect(() => {
-    refreshOcrStatus()
+    refreshCapabilities()
   }, [])
 
   async function handleSave() {
@@ -127,23 +127,45 @@ export function SettingsView() {
         <div className="space-y-4 rounded-lg border p-4">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h3 className="font-semibold">OCR 识别环境</h3>
+              <h3 className="font-semibold">本地能力状态</h3>
               <p className="text-xs text-muted-foreground">
-                图片和扫描 PDF 优先使用 PaddleOCR；未安装时回退 Tesseract / ocrmypdf。
+                不配置模型也可以导入文件、执行本地 OCR、查看内置法规库。
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={refreshOcrStatus} disabled={checkingOcr}>
-              {checkingOcr ? "检测中…" : "重新检测"}
+            <Button variant="outline" size="sm" onClick={refreshCapabilities} disabled={checkingCapabilities}>
+              {checkingCapabilities ? "检测中…" : "重新检测"}
             </Button>
           </div>
           <div className="grid gap-2 text-sm">
-            <OcrStatusRow name="PaddleOCR（推荐）" ok={ocrStatus?.paddleocr} />
-            <OcrStatusRow name="Tesseract（兜底）" ok={ocrStatus?.tesseract} />
-            <OcrStatusRow name="ocrmypdf（扫描 PDF 兜底）" ok={ocrStatus?.ocrmypdf} />
+            <CapabilityStatusRow
+              name="内置法规库"
+              ok={capabilities?.lawbase.available}
+              detail={
+                capabilities?.lawbase.available
+                  ? `${capabilities.lawbase.articleCount.toLocaleString()} 条，版本 ${capabilities.lawbase.version || "未知"}`
+                  : capabilities?.lawbase.error
+              }
+            />
+            <CapabilityStatusRow
+              name="OCR sidecar"
+              ok={capabilities?.ocr.bundledSidecar}
+              detail={
+                capabilities?.ocr.bundledSidecar
+                  ? capabilities.ocr.path
+                  : capabilities?.ocr.available
+                    ? `未检测到内置 sidecar，当前可用：${capabilities.ocr.source || "系统 OCR"}`
+                    : capabilities?.ocr.error
+              }
+            />
+            <CapabilityStatusRow
+              name="PDFium"
+              ok={capabilities?.pdfium.available}
+              detail={capabilities?.pdfium.path || capabilities?.pdfium.source || capabilities?.pdfium.error}
+            />
           </div>
           <div className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground">
-            离线安装示例：<code>python3 -m pip install paddlepaddle paddleocr</code>。
-            法院内网环境建议提前准备 wheel 包和模型文件。
+            安装包已内置法规库、PaddleOCR OCR 能力与 PDFium；无需安装 Python
+            或额外 OCR 工具。系统 OCR 仅作为开发调试兜底。
           </div>
         </div>
       </div>
@@ -151,13 +173,24 @@ export function SettingsView() {
   )
 }
 
-function OcrStatusRow({ name, ok }: { name: string; ok?: boolean }) {
+function CapabilityStatusRow({
+  name,
+  ok,
+  detail,
+}: {
+  name: string
+  ok?: boolean
+  detail?: string
+}) {
   return (
-    <div className="flex items-center justify-between rounded-md border px-3 py-2">
-      <span>{name}</span>
-      <span className={ok ? "text-emerald-500" : "text-muted-foreground"}>
-        {ok ? "已安装" : "未检测到"}
-      </span>
+    <div className="rounded-md border px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <span>{name}</span>
+        <span className={ok ? "text-emerald-500" : "text-muted-foreground"}>
+          {ok ? "可用" : "未检测到"}
+        </span>
+      </div>
+      {detail && <p className="mt-1 break-all text-xs text-muted-foreground">{detail}</p>}
     </div>
   )
 }
