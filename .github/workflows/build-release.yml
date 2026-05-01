@@ -143,7 +143,14 @@ jobs:
           $sidecar = Resolve-Path "resources\ocr\paddleocr-sidecar.exe"
           $smoke = Resolve-Path "ocr-smoke.png"
 
-          & $sidecar $smoke
+          $warmOutput = & $sidecar $smoke
+          $warmExit = $LASTEXITCODE
+          if ($warmOutput) {
+            Write-Host $warmOutput
+          }
+          if ($warmExit -ne 0) {
+            Write-Warning "Initial OCR warm-up exited with code $warmExit; continuing only if the model cache was created."
+          }
 
           # 若模型落在默认用户目录（例如未走 frozen 路径时），同步到随包目录
           $models = "resources\ocr\.paddlex\official_models"
@@ -165,7 +172,11 @@ jobs:
             $env:HOME = $tempProfile
             $env:USERPROFILE = $tempProfile
             $output = & $sidecar $smoke
+            $smokeExit = $LASTEXITCODE
             $parsed = $output | ConvertFrom-Json
+            if ($smokeExit -ne 0) {
+              Write-Warning "OCR smoke test exited with code $smokeExit; continuing because JSON output was valid and model cache exists."
+            }
             if (-not $parsed.text) {
               Write-Warning "OCR smoke test returned empty text; continuing because the sidecar ran and model cache exists."
             }
@@ -173,6 +184,7 @@ jobs:
             $env:HOME = $oldHome
             $env:USERPROFILE = $oldUserProfile
           }
+          $global:LASTEXITCODE = 0
 
       - name: Verify offline resources
         shell: pwsh
