@@ -1,3 +1,12 @@
+# Windows 离线安装包（法规库 + OCR sidecar + PDFium + docs）。
+# 后续可改为 matrix 同时打 macOS / Linux，例如：
+#   strategy:
+#     matrix:
+#       include:
+#         - os: windows-latest
+#         - os: macos-latest
+#         - os: ubuntu-latest
+# 各平台需分别准备 pdfium 与 paddleocr-sidecar，再调用对应 tauri target。
 name: Build Release Packages
 
 on:
@@ -42,7 +51,12 @@ jobs:
 
       - name: Install npm dependencies
         shell: pwsh
-        run: npm ci
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install
+          }
 
       - name: Prepare bundled lawbase and docs
         shell: pwsh
@@ -122,7 +136,7 @@ jobs:
               font = ImageFont.truetype(font_path, 96)
           except Exception:
               font = ImageFont.load_default()
-          draw.text((40, 70), "TEST 123", fill="black", font=font)
+          draw.text((40, 70), "test 123", fill="black", font=font)
           image.save(path)
           '@ | python -
 
@@ -131,7 +145,14 @@ jobs:
 
           & $sidecar $smoke
 
+          # 若模型落在默认用户目录（例如未走 frozen 路径时），同步到随包目录
           $models = "resources\ocr\.paddlex\official_models"
+          $userModels = Join-Path $env:USERPROFILE ".paddlex\official_models"
+          if ((Test-Path $userModels) -and (-not (Test-Path $models))) {
+            New-Item -ItemType Directory -Force -Path "resources\ocr\.paddlex" | Out-Null
+            Copy-Item $userModels $models -Recurse -Force
+          }
+
           if (-not (Test-Path $models)) {
             throw "Missing OCR model cache at $models"
           }
@@ -180,9 +201,16 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe" artifacts\ -ErrorAction SilentlyContinue
-          Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" artifacts\ -ErrorAction SilentlyContinue
-          Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\*.exe" artifacts\ -ErrorAction SilentlyContinue
+          # 使用 --target x86_64-pc-windows-msvc 时产物在三元组目录下（当前 workflow）
+          $triple = "src-tauri\target\x86_64-pc-windows-msvc\release"
+          $plain = "src-tauri\target\release"
+          Copy-Item "$triple\bundle\nsis\*.exe" artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item "$triple\bundle\msi\*.msi" artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item "$triple\*.exe" artifacts\ -ErrorAction SilentlyContinue
+          # 若将来去掉 --target，可回落到默认 release 目录
+          Copy-Item "$plain\bundle\nsis\*.exe" artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item "$plain\bundle\msi\*.msi" artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item "$plain\*.exe" artifacts\ -ErrorAction SilentlyContinue
           if (-not (Get-ChildItem artifacts -File)) {
             throw "No Windows distributables found"
           }

@@ -1,5 +1,9 @@
 {
   "bundle": {
-    "resources": ["../resources/pdfium/libpdfium.so"]
+    "resources": [
+      "../resources",
+      "../lawbase-pack-full/lawbase-pack.json",
+      "../lawbase-pack-full/manifest.json"
+    ]
   }
 }

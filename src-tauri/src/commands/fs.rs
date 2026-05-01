@@ -228,6 +228,8 @@ fn preloaded_law_pack_candidates() -> Vec<(PathBuf, &'static str)> {
             // 发布包: exe 旁边
             push_law_pack_candidates(&mut paths, exe_dir, "bundled-resource");
             push_law_pack_candidates(&mut paths, &exe_dir.join("resources"), "bundled-resource");
+            // Windows/Linux 安装目录常见：安装根\_up_\resources\lawbase\...
+            push_law_pack_candidates(&mut paths, &exe_dir.join("_up_"), "bundled-resource");
             push_law_pack_candidates(
                 &mut paths,
                 &exe_dir.join("../Resources"),
@@ -414,6 +416,7 @@ fn bundled_ocr_sidecar_candidates() -> Vec<PathBuf> {
         if let Some(exe_dir) = exe.parent() {
             push_base(exe_dir);
             push_base(&exe_dir.join("resources"));
+            push_base(&exe_dir.join("_up_"));
             push_base(&exe_dir.join("../Resources"));
             push_base(&exe_dir.join("../../.."));
             push_base(&exe_dir.join("../../../.."));
@@ -866,6 +869,7 @@ fn pdfium_candidate_paths() -> Vec<String> {
                     &mut v,
                     exe_dir.join("resources/_up_/resources/pdfium/pdfium.dll"),
                 );
+                push(&mut v, exe_dir.join("_up_/resources/pdfium/pdfium.dll"));
             }
 
             #[cfg(target_os = "linux")]

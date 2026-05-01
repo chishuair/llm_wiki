@@ -14,6 +14,7 @@
     "offline:prepare": "scripts/prepare-offline-resources.sh",
     "offline:prepare:win": "powershell -ExecutionPolicy Bypass -File scripts/prepare-offline-resources.ps1",
     "tauri:offline": "npm run offline:prepare && npm run tauri build",
+    "tauri build": "tauri build",
     "tauri": "tauri"
   },
   "dependencies": {

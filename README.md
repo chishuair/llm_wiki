@@ -61,6 +61,10 @@ resources/
 
 历史构建中的 `lawbase-pack-full/lawbase-pack.json` 仍可作为兼容路径读取，但新的打包资源应逐步迁移到 `resources/lawbase/`。
 
+### Tauri 平台配置注意（Windows / Linux）
+
+编辑 `src-tauri/tauri.windows.conf.json` 或 `tauri.linux.conf.json` 时，**不要**在 `bundle.resources` 里只写 PDFium 等单个文件。在 Tauri 2 中，平台配置里的 `bundle.resources` 会**覆盖**主文件 `tauri.conf.json` 中的同名数组，安装包会因此只带上 PDFium，**法规库与 OCR 目录不会进包**，设置页会显示「内置法规库 / OCR sidecar 未检测到」。平台配置文件里应保持与主配置一致的完整资源列表（至少包含整个 `../resources` 以及需要的 `lawbase-pack-full` 条目）。
+
 ## 模型配置
 
 设置页支持配置已有模型接口：
@@ -123,6 +127,16 @@ git push origin v0.3.4
 ```
 
 远程构建会在 Windows runner 上下载 Windows 版 PDFium、构建 `paddleocr-sidecar.exe`、预热并打包 PaddleOCR 模型，然后生成 Tauri NSIS 安装包。Windows 安装包不内置大语言模型，但会内置法规库、OCR 能力、PDFium 与离线帮助文档。
+
+本 workflow 在资源就绪后直接使用 `npm run tauri build`（带 Windows MSVC target），未使用 `tauri-apps/tauri-action`；若你更希望用官方 action 统一封装，可在不删减资源准备步骤的前提下再包一层。
+
+常见失败点（便于看日志）：
+
+1. **Paddle / PyInstaller**：`pip install paddlepaddle` 或 PyInstaller 收集依赖失败。
+2. **OCR 模型下载**：Runner 网络或 Hugging Face / 模型源不可达，导致 `.paddlex/official_models` 未生成。
+3. **PDFium 下载**：GitHub Release 拉取失败或解压路径变化。
+4. **NSIS / Tauri 打包**：未安装 NSIS、Rust target 不匹配、或前端 `npm run build` 失败。
+5. **离线资源校验**：`scripts/prepare-offline-resources.ps1` 发现缺少 `lawbase-pack.json`、sidecar、模型或 `pdfium.dll`。
 
 ## 隐私说明
 
