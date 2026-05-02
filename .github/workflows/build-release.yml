@@ -19,6 +19,173 @@ permissions:
   contents: read
 
 jobs:
+  uos-linux:
+    name: UOS Linux x64 offline package
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust Linux
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux packaging tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            protobuf-compiler \
+            libgl1 \
+            libglib2.0-0 \
+            libgomp1
+
+      - name: Install npm dependencies
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Prepare bundled lawbase and docs
+        shell: bash
+        run: |
+          mkdir -p resources/lawbase resources/docs
+          if [ ! -f resources/lawbase/lawbase-pack.json ]; then
+            cp lawbase-pack-full/lawbase-pack.json resources/lawbase/lawbase-pack.json
+          fi
+          if [ -f lawbase-pack-full/manifest.json ] && [ ! -f resources/lawbase/manifest.json ]; then
+            cp lawbase-pack-full/manifest.json resources/lawbase/manifest.json
+          fi
+          if [ ! -f resources/docs/offline-help.md ]; then
+            printf '%s\n' "AI Case Wiki offline help placeholder." > resources/docs/offline-help.md
+          fi
+
+      - name: Prepare Linux PDFium
+        shell: bash
+        run: ./scripts/fetch-pdfium.sh linux-x64
+
+      - name: Install PaddleOCR build dependencies
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          python -m pip install paddlepaddle paddleocr "paddlex[ocr-core]" pyinstaller pillow
+
+      - name: Build PaddleOCR sidecar
+        shell: bash
+        run: |
+          ./scripts/build-paddleocr-sidecar.sh
+          test -x resources/ocr/paddleocr-sidecar
+
+      - name: Warm OCR models and smoke test
+        shell: bash
+        run: |
+          python - <<'PY'
+          from PIL import Image, ImageDraw, ImageFont
+          path = "ocr-smoke.png"
+          image = Image.new("RGB", (900, 260), "white")
+          draw = ImageDraw.Draw(image)
+          try:
+              font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 96)
+          except Exception:
+              font = ImageFont.load_default()
+          draw.text((40, 70), "test 123", fill="black", font=font)
+          image.save(path)
+          PY
+
+          sidecar="$(pwd)/resources/ocr/paddleocr-sidecar"
+          set +e
+          warm_output="$("$sidecar" "$(pwd)/ocr-smoke.png")"
+          warm_exit=$?
+          set -e
+          if [ -n "$warm_output" ]; then
+            echo "$warm_output"
+          fi
+          if [ "$warm_exit" -ne 0 ]; then
+            echo "::warning::Initial OCR warm-up exited with code $warm_exit; continuing only if the model cache was created."
+          fi
+
+          models="resources/ocr/.paddlex/official_models"
+          user_models="$HOME/.paddlex/official_models"
+          if [ -d "$user_models" ] && [ ! -d "$models" ]; then
+            mkdir -p resources/ocr/.paddlex
+            cp -a "$user_models" "$models"
+          fi
+          test -d "$models"
+
+          temp_home="$RUNNER_TEMP/ocr-empty-home"
+          mkdir -p "$temp_home"
+          set +e
+          smoke_output="$(HOME="$temp_home" USERPROFILE="$temp_home" "$sidecar" "$(pwd)/ocr-smoke.png")"
+          smoke_exit=$?
+          set -e
+          python - <<PY
+          import json
+          json.loads("""${smoke_output}""")
+          PY
+          if [ "$smoke_exit" -ne 0 ]; then
+            echo "::warning::OCR smoke test exited with code $smoke_exit; continuing because JSON output was valid and model cache exists."
+          fi
+
+      - name: Verify offline resources
+        shell: bash
+        run: |
+          test -f resources/lawbase/lawbase-pack.json
+          test -x resources/ocr/paddleocr-sidecar
+          test -d resources/ocr/.paddlex/official_models
+          test -f resources/pdfium/libpdfium.so
+          test -d resources/docs
+
+      - name: Build frontend
+        shell: bash
+        run: npm run build
+
+      - name: Check Rust backend
+        shell: bash
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu
+
+      - name: Build Tauri UOS package
+        shell: bash
+        env:
+          CI: "true"
+        run: npm run tauri build -- --target x86_64-unknown-linux-gnu --bundles deb,appimage
+
+      - name: Collect UOS distributables
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp -v src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb artifacts/ || true
+          cp -v src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage artifacts/ || true
+          test "$(find artifacts -type f | wc -l)" -gt 0
+          ls -lh artifacts
+
+      - name: Upload UOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-case-wiki-uos-linux-x64
+          path: artifacts/*
+          if-no-files-found: error
+
   windows:
     name: Windows x64 offline installer
     runs-on: windows-latest
