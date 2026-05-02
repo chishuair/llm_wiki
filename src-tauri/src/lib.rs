@@ -42,6 +42,7 @@ pub fn run() {
             commands::fs::local_capabilities_status,
             commands::fs::delete_file,
             commands::fs::find_related_wiki_pages,
+            commands::llm::llm_chat_completion,
             commands::fs::create_directory,
             commands::project::create_project,
             commands::project::open_project,

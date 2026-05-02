@@ -10,13 +10,86 @@ export interface StreamCallbacks {
 }
 
 const DECODER = new TextDecoder()
+// 兼顾稳定性与多数本地/云端模型网关限制，接近 6MB 时自动压缩消息。
 const MAX_REQUEST_BODY_BYTES = 5_500_000
+const OVERSIZE_NOTE = "\n\n[...内容过长，已自动截断以适配请求大小限制。建议启用分块摘要/分批解析以获得完整结果...]"
+
+function bodyByteLength(text: string): number {
+  return new TextEncoder().encode(text).length
+}
+
+function prepareBodyForSizeLimit(body: Record<string, unknown>): { serializedBody: string; bodyBytes: number; truncated: boolean } | null {
+  const direct = JSON.stringify(body)
+  const directBytes = bodyByteLength(direct)
+  if (directBytes <= MAX_REQUEST_BODY_BYTES) {
+    return { serializedBody: direct, bodyBytes: directBytes, truncated: false }
+  }
+
+  const messagesRaw = body.messages
+  if (!Array.isArray(messagesRaw)) return null
+
+  const messages = messagesRaw.map((m) => ({ ...(m as Record<string, unknown>) }))
+  let truncated = false
+
+  for (let pass = 0; pass < 30; pass++) {
+    const candidateBody = { ...body, messages }
+    const serialized = JSON.stringify(candidateBody)
+    const bytes = bodyByteLength(serialized)
+    if (bytes <= MAX_REQUEST_BODY_BYTES) {
+      return { serializedBody: serialized, bodyBytes: bytes, truncated }
+    }
+
+    let longestIdx = -1
+    let longestLen = 0
+    for (let i = 0; i < messages.length; i++) {
+      const content = messages[i].content
+      if (typeof content !== "string") continue
+      if (content.length > longestLen) {
+        longestLen = content.length
+        longestIdx = i
+      }
+    }
+
+    if (longestIdx === -1 || longestLen < 800) break
+
+    const current = String(messages[longestIdx].content ?? "")
+    const base = current.includes(OVERSIZE_NOTE) ? current.replace(OVERSIZE_NOTE, "") : current
+    const keepLength = Math.max(600, Math.floor(base.length * 0.75))
+    messages[longestIdx].content = base.slice(0, keepLength) + OVERSIZE_NOTE
+    truncated = true
+  }
+
+  return null
+}
 
 function parseLines(chunk: Uint8Array, buffer: string): [string[], string] {
   const text = buffer + DECODER.decode(chunk, { stream: true })
   const lines = text.split("\n")
   const remaining = lines.pop() ?? ""
   return [lines, remaining]
+}
+
+async function completeViaTauriProxy(args: {
+  url: string
+  headers: Record<string, string>
+  body: Record<string, unknown>
+}): Promise<string> {
+  const { invoke } = await import("@tauri-apps/api/core")
+  return await invoke<string>("llm_chat_completion", { request: args })
+}
+
+function canUseTauriProxy(provider: LlmConfig["provider"]): boolean {
+  return provider === "ollama" || provider === "custom" || provider === "openai" || provider === "minimax"
+}
+
+function isNetworkFetchError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return (
+    err.name === "TypeError" ||
+    err.message === "Failed to fetch" ||
+    err.message === "Load failed" ||
+    err.message.includes("NetworkError")
+  )
 }
 
 export async function streamChat(
@@ -55,16 +128,23 @@ export async function streamChat(
   }
 
   let response: Response
+  let serializedBody = ""
   try {
     const baseBody = providerConfig.buildBody(messages) as Record<string, unknown>
     const body = requestOverrides ? { ...baseBody, ...requestOverrides } : baseBody
-    const serializedBody = JSON.stringify(body)
-    const bodyBytes = new TextEncoder().encode(serializedBody).length
-    if (bodyBytes > MAX_REQUEST_BODY_BYTES) {
+    const prepared = prepareBodyForSizeLimit(body)
+    if (!prepared) {
+      const serializedBody = JSON.stringify(body)
+      const bodyBytes = bodyByteLength(serializedBody)
       onError(new Error(
-        `本次请求内容约 ${(bodyBytes / 1048576).toFixed(1)} MB，超过本地模型服务安全上限。请减少一次性输入内容，或等待系统完成长文档分块提要后重试。`
+        `本次请求内容约 ${(bodyBytes / 1048576).toFixed(1)} MB，超过安全上限。系统已尝试自动压缩但仍失败，请改用分批解析或先做文档分块后重试。`
       ))
       return
+    }
+    serializedBody = prepared.serializedBody
+    const { truncated } = prepared
+    if (truncated) {
+      console.warn("[llm-client] request body exceeded size limit, auto-truncated messages")
     }
     response = await fetch(providerConfig.url, {
       method: "POST",
@@ -75,6 +155,23 @@ export async function streamChat(
       keepalive: false,
     })
   } catch (err) {
+    if (isNetworkFetchError(err) && canUseTauriProxy(config.provider) && serializedBody) {
+      try {
+        const text = await completeViaTauriProxy({
+          url: providerConfig.url,
+          headers: providerConfig.headers,
+          body: JSON.parse(serializedBody) as Record<string, unknown>,
+        })
+        if (text) onToken(text)
+        onDone()
+        return
+      } catch (proxyErr) {
+        const original = err instanceof Error ? err.message : String(err)
+        const proxyMessage = proxyErr instanceof Error ? proxyErr.message : String(proxyErr)
+        onError(new Error(`模型服务连接失败：${proxyMessage}（前端直连错误：${original}）`))
+        return
+      }
+    }
     if (err instanceof Error && (err.name === "AbortError" || err.message === "Load failed")) {
       // Check if it was user-initiated abort
       if (signal?.aborted) {
@@ -82,7 +179,7 @@ export async function streamChat(
         return
       }
       // Otherwise it's a timeout or network error
-      onError(new Error("Request timed out or network error. The model may need more time — try again or use a faster model."))
+      onError(new Error("请求超时或网络异常。可稍后重试，或更换响应更快的模型。"))
       return
     }
     onError(err instanceof Error ? err : new Error(String(err)))
@@ -102,7 +199,7 @@ export async function streamChat(
   }
 
   if (!response.body) {
-    onError(new Error("Response body is null"))
+    onError(new Error("模型返回为空（response body 为 null）"))
     return
   }
 
@@ -140,7 +237,7 @@ export async function streamChat(
     }
     if (err instanceof Error && err.message === "Load failed") {
       // WebKit network error during streaming — connection dropped
-      onError(new Error("Connection lost during streaming. Try again."))
+      onError(new Error("流式输出过程中连接中断，请重试。"))
       return
     }
     onError(err instanceof Error ? err : new Error(String(err)))
