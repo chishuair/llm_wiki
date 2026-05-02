@@ -248,17 +248,24 @@ fn push_law_pack_candidates(
     base: &Path,
     source: &'static str,
 ) {
+    // Tauri may place a bundled directory either as `resources/...` or merge
+    // its contents directly into the resource root, depending on platform and
+    // bundler layout. Check both forms so installed Windows packages are not
+    // sensitive to that detail.
     paths.push((base.join(PRELOADED_LAW_PACK), source));
+    paths.push((base.join("lawbase/lawbase-pack.json"), source));
+    paths.push((base.join("lawbase-pack.json"), source));
     paths.push((base.join(LEGACY_PRELOADED_LAW_PACK), "legacy-bundled"));
 }
 
 fn lawbase_status() -> LawbaseStatus {
-    for (path, source) in preloaded_law_pack_candidates() {
+    let candidates = preloaded_law_pack_candidates();
+    for (path, source) in &candidates {
         if !path.exists() {
             continue;
         }
-        match fs::read_to_string(&path) {
-            Ok(raw) => return parse_lawbase_status(&raw, path, source),
+        match fs::read_to_string(path) {
+            Ok(raw) => return parse_lawbase_status(&raw, path.clone(), source),
             Err(err) => {
                 return LawbaseStatus {
                     available: false,
@@ -280,7 +287,15 @@ fn lawbase_status() -> LawbaseStatus {
         article_count: 0,
         updated_at: None,
         path: None,
-        error: Some("未找到内置法规库，请导入离线资源包。".to_string()),
+        error: Some(format!(
+            "未找到内置法规库，请导入离线资源包。已检查：{}",
+            candidates
+                .iter()
+                .take(10)
+                .map(|(path, _)| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("；")
+        )),
     }
 }
 
@@ -346,7 +361,11 @@ fn parse_lawbase_status(raw: &str, path: PathBuf, source: &str) -> LawbaseStatus
 }
 
 fn ocr_capability_status() -> OcrCapabilityStatus {
-    let bundled = bundled_ocr_sidecar();
+    let bundled_candidates = bundled_ocr_sidecar_candidates();
+    let bundled = bundled_candidates
+        .iter()
+        .find(|path| path.exists() && path.is_file())
+        .cloned();
     let system_paddleocr = command_ok("python3", &["-c", "import paddleocr; print('ok')"])
         || command_ok("python", &["-c", "import paddleocr; print('ok')"]);
     let tesseract = command_ok("tesseract", &["--version"]);
@@ -371,7 +390,15 @@ fn ocr_capability_status() -> OcrCapabilityStatus {
         error: if available {
             None
         } else {
-            Some("未找到内置 OCR sidecar，也未检测到系统 OCR。".to_string())
+            Some(format!(
+                "未找到内置 OCR sidecar，也未检测到系统 OCR。已检查：{}",
+                bundled_candidates
+                    .iter()
+                    .take(10)
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ))
         },
         bundled_sidecar: bundled.is_some(),
         system_paddleocr,
@@ -397,6 +424,9 @@ fn bundled_ocr_sidecar_candidates() -> Vec<PathBuf> {
     let mut push_base = |base: &Path| {
         for name in names {
             paths.push(base.join("resources/ocr").join(name));
+            paths.push(base.join("resources/resources/ocr").join(name));
+            paths.push(base.join("_up_/resources/ocr").join(name));
+            paths.push(base.join("_up_/resources/resources/ocr").join(name));
             paths.push(base.join("ocr").join(name));
         }
     };
