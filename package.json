@@ -13,6 +13,7 @@
     "ocr:sidecar": "scripts/build-paddleocr-sidecar.sh",
     "offline:prepare": "scripts/prepare-offline-resources.sh",
     "offline:prepare:win": "powershell -ExecutionPolicy Bypass -File scripts/prepare-offline-resources.ps1",
+    "mac:appstore": "scripts/build-macos-appstore.sh",
     "tauri:offline": "npm run offline:prepare && npm run tauri build",
     "tauri build": "tauri build",
     "tauri": "tauri"

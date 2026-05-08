@@ -1,32 +1,17 @@
 # LLM Wiki
 
-<p align="center">
-  <img src="logo.jpg" width="128" height="128" style="border-radius: 22%;" alt="LLM Wiki Logo">
-</p>
 
-<p align="center">
-  <strong>一个能自我构建的个人知识库。</strong><br>
-  LLM 阅读你的文档，构建结构化 Wiki，并持续保持更新。
-</p>
 
-<p align="center">
-  <a href="#这是什么">这是什么？</a> •
-  <a href="#我们的修改与新增">功能特性</a> •
-  <a href="#技术栈">技术栈</a> •
-  <a href="#安装">安装</a> •
-  <a href="#致谢">致谢</a> •
-  <a href="#许可证">许可证</a>
-</p>
+**一个能自我构建的个人知识库。**  
+LLM 阅读你的文档，构建结构化 Wiki，并持续保持更新。
 
-<p align="center">
-  <a href="README.md">English</a> | 中文
-</p>
+[这是什么？](#这是什么) • [功能特性](#我们的修改与新增) • [技术栈](#技术栈) • [安装](#安装) • [致谢](#致谢) • [许可证](#许可证)
+
+[English](README.md) | 中文
 
 ---
 
-<p align="center">
-  <img src="assets/overview.jpg" width="100%" alt="概览">
-</p>
+
 
 ## 功能亮点
 
@@ -47,9 +32,7 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 
 本项目基于 [Karpathy 的 LLM Wiki 方法论](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) —— 一套使用 LLM 构建个人知识库的方法论。我们将其核心理念实现为一个完整的桌面应用，并做了大量增强。
 
-<p align="center">
-  <img src="assets/llm_wiki_arch.jpg" width="100%" alt="LLM Wiki 架构图">
-</p>
+
 
 ## 致谢
 
@@ -68,15 +51,14 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 - **Obsidian 兼容** —— Wiki 目录可直接作为 Obsidian 仓库使用
 - **人类策展，LLM 维护** —— 基本角色分工
 
-<p align="center">
-  <img src="assets/5-obsidian_compatibility.jpg" width="100%" alt="Obsidian 兼容">
-</p>
+
 
 ## 我们的修改与新增
 
 ### 1. 从命令行到桌面应用
 
 原始设计是一个抽象的模式文档，设计上是复制粘贴给 LLM agent 使用的。我们将其构建为**完整的跨平台桌面应用**：
+
 - **三栏布局**：知识树 / 文件树（左）+ 聊天（中）+ 预览（右）
 - **图标侧边栏** —— 在 Wiki、资料源、搜索、图谱、Lint、审核、深度研究、设置之间快速切换
 - **自定义可调面板** —— 左右面板支持拖拽调整大小，带最小/最大约束
@@ -87,6 +69,7 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 ### 2. Purpose.md —— Wiki 的灵魂
 
 原始设计有 Schema（Wiki 如何运作），但没有正式定义 **为什么** 这个 Wiki 存在。我们新增了 `purpose.md`：
+
 - 定义目标、关键问题、研究范围、演进中的论点
 - LLM 在每次摄入和查询时都会读取它以获取上下文
 - LLM 可以根据使用模式建议更新
@@ -112,6 +95,7 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 ```
 
 超越原始设计的摄入增强：
+
 - **SHA256 增量缓存** —— 摄入前检查源文件内容哈希，未变更则自动跳过，节省 LLM token 和时间
 - **持久化摄入队列** —— 串行处理防止并发 LLM 调用；队列持久化到磁盘，应用重启后自动恢复；失败任务自动重试最多 3 次
 - **文件夹导入** —— 递归导入保留目录结构；文件夹路径作为分类上下文传给 LLM（如 "papers > energy" 帮助分类）
@@ -124,21 +108,23 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 
 ### 4. 知识图谱与关联度模型
 
-<p align="center">
-  <img src="assets/3-knowledge_graph.jpg" width="100%" alt="知识图谱">
-</p>
+
 
 原始设计提到了 `[[wikilinks]]` 用于交叉引用，但没有图分析。我们构建了**完整的知识图谱可视化和关联度引擎**：
 
 **四信号关联度模型：**
-| 信号 | 权重 | 描述 |
-|------|------|------|
-| 直接链接 | ×3.0 | 通过 `[[wikilinks]]` 链接的页面 |
-| 来源重叠 | ×4.0 | 共享同一原始资料的页面（通过 frontmatter `sources[]`） |
-| Adamic-Adar | ×1.5 | 共享共同邻居的页面（按邻居度数加权） |
-| 类型亲和 | ×1.0 | 相同页面类型的加分（实体↔实体，概念↔概念） |
+
+
+| 信号          | 权重   | 描述                                      |
+| ----------- | ---- | --------------------------------------- |
+| 直接链接        | ×3.0 | 通过 `[[wikilinks]]` 链接的页面                |
+| 来源重叠        | ×4.0 | 共享同一原始资料的页面（通过 frontmatter `sources[]`） |
+| Adamic-Adar | ×1.5 | 共享共同邻居的页面（按邻居度数加权）                      |
+| 类型亲和        | ×1.0 | 相同页面类型的加分（实体↔实体，概念↔概念）                  |
+
 
 **图谱可视化（sigma.js + graphology + ForceAtlas2）：**
+
 - 按页面类型或社区着色节点，按链接数缩放节点大小（√ 缩放）
 - 边的粗细和颜色按关联权重变化（绿色=强，灰色=弱）
 - 悬停交互：邻居节点保持可见，非邻居变暗，边高亮并显示关联度分数
@@ -156,32 +142,31 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 - **12 色调色板** —— 集群之间视觉区分清晰
 - **社区图例** —— 显示核心节点标签、成员数和内聚度
 
-<p align="center">
-  <img src="assets/kg_community.jpg" width="100%" alt="Louvain 社区检测">
-</p>
+
 
 ### 6. 图谱洞察 —— 惊奇连接与知识空白
 
 原始设计中没有。系统**自动分析图谱结构**，呈现可操作的洞察：
 
 **惊奇连接：**
+
 - 检测意外关联：跨社区边、跨类型链接、边缘↔核心耦合
 - 复合惊奇度评分排序最值得关注的连接
 - 可消除 —— 标记为已查看后不再重复出现
 
 **知识空白：**
+
 - **孤立页面**（度 ≤ 1）—— 与 Wiki 其余部分缺少连接的页面
 - **稀疏社区**（cohesion < 0.15，≥ 3 页）—— 内部交叉引用薄弱的知识领域
 - **桥接节点**（连接 3+ 个集群）—— 维系多个知识领域的关键枢纽页面
 
 **交互：**
+
 - 点击洞察卡片**高亮**图谱中对应节点和边；再次点击取消
 - 知识空白和桥接节点附带 **Deep Research 按钮** —— 触发 LLM 智能主题生成（读取 overview.md + purpose.md 获取领域上下文）
 - 研究主题在**可编辑确认对话框**中展示 —— 用户可修改主题和搜索查询后再启动
 
-<p align="center">
-  <img src="assets/kg_insights.jpg" width="100%" alt="图谱洞察">
-</p>
+
 
 ### 7. 优化的查询检索管线
 
@@ -259,9 +244,7 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 
 ### 12. 深度研究
 
-<p align="center">
-  <img src="assets/1-deepresearch.jpg" width="100%" alt="深度研究">
-</p>
+
 
 原始设计中没有。当 LLM 识别出知识空白时：
 
@@ -277,9 +260,7 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 
 ### 13. 浏览器扩展（网页剪藏）
 
-<p align="center">
-  <img src="assets/4-chrome_extension_webclipper.jpg" width="100%" alt="Chrome 扩展网页剪藏">
-</p>
+
 
 原始设计提到了 Obsidian Web Clipper。我们构建了**专用 Chrome 扩展**（Manifest V3）：
 
@@ -295,15 +276,17 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 
 原始设计聚焦于纯文本/Markdown。我们支持保留文档语义的结构化提取：
 
-| 格式 | 方法 |
-|------|------|
-| PDF | pdf-extract（Rust）+ 文件缓存 |
-| DOCX | docx-rs —— 标题、加粗/斜体、列表、表格 → 结构化 Markdown |
-| PPTX | ZIP + XML —— 逐页提取，保留标题/列表结构 |
-| XLSX/XLS/ODS | calamine —— 正确的单元格类型、多工作表支持、Markdown 表格 |
-| 图片 | 原生预览（png, jpg, gif, webp, svg 等） |
-| 视频/音频 | 内置播放器 |
-| 网页剪藏 | Readability.js + Turndown.js → 干净的 Markdown |
+
+| 格式           | 方法                                          |
+| ------------ | ------------------------------------------- |
+| PDF          | pdf-extract（Rust）+ 文件缓存                     |
+| DOCX         | docx-rs —— 标题、加粗/斜体、列表、表格 → 结构化 Markdown    |
+| PPTX         | ZIP + XML —— 逐页提取，保留标题/列表结构                 |
+| XLSX/XLS/ODS | calamine —— 正确的单元格类型、多工作表支持、Markdown 表格     |
+| 图片           | 原生预览（png, jpg, gif, webp, svg 等）            |
+| 视频/音频        | 内置播放器                                       |
+| 网页剪藏         | Readability.js + Turndown.js → 干净的 Markdown |
+
 
 ### 15. 文件删除级联清理
 
@@ -346,27 +329,30 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 
 ## 技术栈
 
-| 层级 | 技术 |
-|------|------|
-| 桌面 | Tauri v2（Rust 后端） |
-| 前端 | React 19 + TypeScript + Vite |
-| UI | shadcn/ui + Tailwind CSS v4 |
-| 编辑器 | Milkdown（基于 ProseMirror 的所见即所得） |
-| 图谱 | sigma.js + graphology + ForceAtlas2 |
-| 搜索 | 分词搜索 + 图谱关联度 + 可选向量（LanceDB） |
-| 向量数据库 | LanceDB（Rust，嵌入式，可选） |
-| PDF | pdf-extract |
-| Office | docx-rs + calamine |
-| 国际化 | react-i18next |
-| 状态管理 | Zustand |
-| LLM | 流式 fetch（OpenAI、Anthropic、Google、Ollama、自定义） |
-| 网络搜索 | Tavily API |
+
+| 层级     | 技术                                           |
+| ------ | -------------------------------------------- |
+| 桌面     | Tauri v2（Rust 后端）                            |
+| 前端     | React 19 + TypeScript + Vite                 |
+| UI     | shadcn/ui + Tailwind CSS v4                  |
+| 编辑器    | Milkdown（基于 ProseMirror 的所见即所得）              |
+| 图谱     | sigma.js + graphology + ForceAtlas2          |
+| 搜索     | 分词搜索 + 图谱关联度 + 可选向量（LanceDB）                 |
+| 向量数据库  | LanceDB（Rust，嵌入式，可选）                         |
+| PDF    | pdf-extract                                  |
+| Office | docx-rs + calamine                           |
+| 国际化    | react-i18next                                |
+| 状态管理   | Zustand                                      |
+| LLM    | 流式 fetch（OpenAI、Anthropic、Google、Ollama、自定义） |
+| 网络搜索   | Tavily API                                   |
+
 
 ## 安装
 
 ### 预编译二进制文件
 
 从 [Releases](https://github.com/nashsu/llm_wiki/releases) 下载：
+
 - **macOS**：`.dmg`（Apple Silicon + Intel）
 - **Windows**：`.msi`
 - **Linux**：`.deb` / `.AppImage`
@@ -400,6 +386,12 @@ npm run tauri build    # 生产构建
 7. 查看 **审核** 处理需要你关注的项目
 8. 定期运行 **Lint** 维护 Wiki 健康度
 
+## 使用说明
+
+如果你希望按“从安装到日常使用”的步骤化方式查看，请阅读：
+
+- [使用说明](使用说明.md)
+
 ## 项目结构
 
 ```
@@ -425,13 +417,7 @@ my-wiki/
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=nashsu%2Fllm_wiki&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nashsu/llm_wiki&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nashsu/llm_wiki&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nashsu/llm_wiki&type=date&legend=top-left" />
- </picture>
-</a>
+
 
 ## 许可证
 

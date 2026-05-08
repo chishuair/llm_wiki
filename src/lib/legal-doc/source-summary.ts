@@ -17,9 +17,12 @@ import type { LlmConfig } from "@/stores/wiki-store"
  * 5. 最终喂给文书生成器的是这些摘要而非原文，节省上下文并保证关键细节不丢。
  */
 
-const CHUNK_SIZE = 4000
+const DEFAULT_CHUNK_SIZE = 2400
+const MIN_CHUNK_SIZE = 1000
 const CHUNK_OVERLAP = 200 // 避免条款跨块被切断
 const SUMMARY_CHAR_CAP = 3500 // 单文件摘要上限，回落到生成主阶段用
+const CHUNK_MAX_TOKENS = 700
+const MAX_CHUNK_ATTEMPTS = 2
 
 export interface SourceSummary {
   relativePath: string
@@ -55,7 +58,17 @@ function hashString(input: string): string {
   return h.toString(16).padStart(8, "0")
 }
 
-function chunk(text: string, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP): string[] {
+function chunkSizeForConfig(config: LlmConfig): number {
+  const configuredContext = Number(config.maxContextSize || 0)
+  if (!Number.isFinite(configuredContext) || configuredContext <= 0) return DEFAULT_CHUNK_SIZE
+
+  // Keep per-request payloads conservative for slower LAN model gateways.
+  // The user-facing maxContextSize still matters, but one chunk should only
+  // consume a small slice of it so nginx/model-server timeouts are less likely.
+  return Math.max(MIN_CHUNK_SIZE, Math.min(DEFAULT_CHUNK_SIZE, Math.floor(configuredContext * 0.12)))
+}
+
+function chunk(text: string, size = DEFAULT_CHUNK_SIZE, overlap = CHUNK_OVERLAP): string[] {
   const chunks: string[] = []
   let i = 0
   while (i < text.length) {
@@ -65,6 +78,22 @@ function chunk(text: string, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP): string
     i = end - overlap
   }
   return chunks
+}
+
+function isTransientLlmError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /HTTP\s*(408|429|500|502|503|504)|Gateway Timeout|timeout|timed out|Failed to fetch|Load failed|NetworkError/i.test(message)
+}
+
+function fallbackChunkSummary(chunkText: string, chunkIndex: number, totalChunks: number): string {
+  const compact = chunkText.replace(/\s+/g, " ").trim()
+  const excerpt = compact.length > 900 ? `${compact.slice(0, 900)}……` : compact
+  return [
+    `### 提要（${chunkIndex + 1}/${totalChunks}，模型提炼失败回退）`,
+    "",
+    `- 本片段模型请求超时或网关失败，已保留原文摘录供后续处理。`,
+    excerpt ? `- 原文摘录：${excerpt}` : "- 原文摘录为空。",
+  ].join("\n")
 }
 
 export function cacheKeyFor(relativePath: string, rawText: string): string {
@@ -151,6 +180,7 @@ async function summarizeChunk(
     },
   ]
   let buffer = ""
+  let capturedError: Error | null = null
   await streamChat(
     llmConfig,
     messages,
@@ -160,12 +190,42 @@ async function summarizeChunk(
         onToken?.(t)
       },
       onDone: () => {},
-      onError: () => {},
+      onError: (err) => {
+        capturedError = err
+      },
     },
     signal,
-    { temperature: 0.1 }
+    { temperature: 0.1, max_tokens: CHUNK_MAX_TOKENS }
   )
+  if (capturedError) throw capturedError
   return buffer.trim()
+}
+
+async function summarizeChunkWithRetry(
+  chunkText: string,
+  chunkIndex: number,
+  totalChunks: number,
+  llmConfig: LlmConfig,
+  onToken: ((token: string) => void) | undefined,
+  signal: AbortSignal | undefined
+): Promise<string> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
+    if (signal?.aborted) return ""
+    try {
+      return await summarizeChunk(chunkText, chunkIndex, totalChunks, llmConfig, onToken, signal)
+    } catch (error) {
+      lastError = error
+      if (!isTransientLlmError(error) || attempt >= MAX_CHUNK_ATTEMPTS) break
+      await new Promise((resolve) => setTimeout(resolve, 1200 * attempt))
+    }
+  }
+  console.warn("source summary chunk failed, using excerpt fallback", {
+    chunkIndex,
+    totalChunks,
+    error: lastError,
+  })
+  return fallbackChunkSummary(chunkText, chunkIndex, totalChunks)
 }
 
 export async function summarizeSource(opts: SummarizeOptions): Promise<SourceSummary> {
@@ -174,11 +234,11 @@ export async function summarizeSource(opts: SummarizeOptions): Promise<SourceSum
   const cached = await readCachedSummary(projectPath, relativePath, key)
   if (cached) return cached
 
-  const chunks = chunk(rawText)
+  const chunks = chunk(rawText, chunkSizeForConfig(llmConfig))
   const parts: string[] = []
   for (let i = 0; i < chunks.length; i++) {
     opts.onChunkStart?.(i, chunks.length)
-    const piece = await summarizeChunk(
+    const piece = await summarizeChunkWithRetry(
       chunks[i],
       i,
       chunks.length,

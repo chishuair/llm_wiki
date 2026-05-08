@@ -16,6 +16,46 @@ import { SUMMARIZE_THRESHOLD, summarizeSource } from "@/lib/legal-doc/source-sum
 // the following `\s*---\n` anchor still stops at the closing ---.
 const FILE_BLOCK_REGEX = /---FILE:\s*([^\n]+?)\s*---\n([\s\S]*?)---END FILE---/g
 
+function buildChunkedFallbackPreview(sourceContent: string, fileName: string, budget = 12000): string {
+  if (sourceContent.length <= budget) return sourceContent
+  const window = Math.max(1200, Math.floor((budget - 600) / 3))
+  const head = sourceContent.slice(0, window)
+  const midStart = Math.max(0, Math.floor(sourceContent.length / 2) - Math.floor(window / 2))
+  const middle = sourceContent.slice(midStart, midStart + window)
+  const tail = sourceContent.slice(Math.max(0, sourceContent.length - window))
+  return [
+    `【${fileName} 超长原件分段预览（摘要失败回退）】`,
+    "",
+    "【开头片段】",
+    head,
+    "",
+    "【中间片段】",
+    middle,
+    "",
+    "【结尾片段】",
+    tail,
+    "",
+    `（原文约 ${sourceContent.length} 字，已按头/中/尾压缩抽样）`,
+  ].join("\n")
+}
+
+function capContentForPrompt(text: string, budget = 30000): string {
+  if (text.length <= budget) return text
+  const marker = "\n\n[...内容过长，已分段压缩...]\n\n"
+  const remaining = Math.max(3000, budget - marker.length * 2)
+  const window = Math.max(1200, Math.floor(remaining / 3))
+  const head = text.slice(0, window)
+  const midStart = Math.max(0, Math.floor(text.length / 2) - Math.floor(window / 2))
+  const middle = text.slice(midStart, midStart + window)
+  const tail = text.slice(Math.max(0, text.length - window))
+  return `${head}${marker}${middle}${marker}${tail}`
+}
+
+function capAnalysisForGeneration(text: string, budget = 10000): string {
+  if (text.length <= budget) return text
+  return `${text.slice(0, budget)}\n\n[...阶段 1 分析较长，已截断以降低模型网关超时风险...]`
+}
+
 /**
  * Build the language rule for ingest prompts.
  * Uses the user's configured output language, falling back to source content detection.
@@ -87,13 +127,12 @@ export async function autoIngest(
       ].join("\n")
     } catch (err) {
       console.warn("source summarize failed, fallback to capped content", err)
-      effectiveContent = sourceContent.slice(0, 12000) + "\n\n[...原件过长，已截断；建议安装/配置长文档摘要后重试...]"
+      effectiveContent = buildChunkedFallbackPreview(sourceContent, fileName, 12000)
     }
   }
 
-  const truncatedContent = effectiveContent.length > 30000
-    ? effectiveContent.slice(0, 30000) + "\n\n[...truncated...]"
-    : effectiveContent
+  const promptBudget = sourceContent.length > SUMMARIZE_THRESHOLD ? 18000 : 30000
+  const truncatedContent = capContentForPrompt(effectiveContent, promptBudget)
 
   // ── Step 1: Analysis ──────────────────────────────────────────
   // LLM reads the source and produces a structured analysis:
@@ -120,7 +159,7 @@ export async function autoIngest(
       },
     },
     signal,
-    { temperature: 0.1 },
+    { temperature: 0.1, max_tokens: 1800 },
   )
 
   if (useActivityStore.getState().items.find((i) => i.id === activityId)?.status === "error") {
@@ -132,6 +171,7 @@ export async function autoIngest(
   activity.updateItem(activityId, { detail: "步骤 2/2：正在按 9 个分类目录写入知识页面..." })
 
   let generation = ""
+  const cappedAnalysis = capAnalysisForGeneration(analysis)
 
   await streamChat(
     llmConfig,
@@ -149,7 +189,7 @@ export async function autoIngest(
           "",
           "## Stage 1 Analysis (context only — do not repeat)",
           "",
-          analysis,
+          cappedAnalysis,
           "",
           "## Original Source Content",
           "",
@@ -171,7 +211,7 @@ export async function autoIngest(
       },
     },
     signal,
-    { temperature: 0.1 },
+    { temperature: 0.1, max_tokens: 2600 },
   )
 
   if (useActivityStore.getState().items.find((i) => i.id === activityId)?.status === "error") {

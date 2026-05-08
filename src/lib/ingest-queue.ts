@@ -312,7 +312,7 @@ async function processNext(projectPath: string): Promise<void> {
   // Check if LLM is configured
   if (!llmConfig.apiKey && llmConfig.provider !== "ollama" && llmConfig.provider !== "custom") {
     next.status = "failed"
-    next.error = "LLM not configured — set API key in Settings"
+    next.error = "LLM 未配置，请先在设置中填写 API Key 或本地模型配置"
     processing = false
     await saveQueue(pp)
     processNext(pp)
@@ -331,6 +331,9 @@ async function processNext(projectPath: string): Promise<void> {
 
   try {
     const writtenFiles = await autoIngest(pp, fullSourcePath, llmConfig, currentAbortController.signal, next.folderContext)
+    if (writtenFiles.length === 0) {
+      throw new Error("未生成任何页面，已标记为失败任务，可在活动面板重试")
+    }
     lastWrittenFiles = writtenFiles
 
     // Success: remove from queue
